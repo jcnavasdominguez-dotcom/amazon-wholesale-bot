@@ -1,104 +1,76 @@
-import json
-import requests
-import pandas as pd
 import streamlit as st
+import pandas as pd
+from src.reverse_sourcing import ejecutar_busqueda_inversa
 
-KEEPA_CATEGORIES = {
-    "Todas": None,
-    "Electrónica": 172282,
-    "Hogar y Cocina": 1055398,
-    "Oficina": 1064954,
-    "Juguetes": 1657930
-}
+st.set_page_config(page_title="Amazon Wholesale Finder", layout="wide", page_icon="📦")
 
-def ejecutar_busqueda_inversa(
-    marca=None,
-    categoria="Todas",
-    modo="GLOBAL",
-    api_key="",
-    min_roi=25.0,
-    max_bsr=50000,
-    min_precio=15.0,
-    max_precio=150.0,
-    min_sellers=3,
-    max_sellers=12,
-    max_amazon_share=20.0,
-    min_drops=30,
-    usar_precio_90d=True,
-    solo_estandar=True,
-    prep_fee=1.50,
-    inbound_fee=0.50
-):
-    if not api_key:
-        st.error("No se proporcionó una Keepa API Key válida.")
-        return pd.DataFrame()
+st.title("📦 Amazon Wholesale Finder")
+st.caption("Explorador inteligente de oportunidades globales con filtros avanzados")
 
-    # Construcción limpia de parámetros para Keepa Product Finder
-    selection = {
-        "current_NEW_gte": int(min_precio * 100),
-        "current_NEW_lte": int(max_precio * 100),
-        "salesRanks_60_lte": int(max_bsr),
-        "fbaOfferCount_gte": int(min_sellers),
-        "fbaOfferCount_lte": int(max_sellers)
-    }
+# Sidebar - Filtros del Bot
+st.sidebar.header("⚙️ Filtros Wholesale")
+api_key = st.sidebar.text_input("Keepa API Key", type="password", key="keepa_key")
 
-    if modo == "MARCA" and marca:
-        selection["title"] = marca
+st.sidebar.subheader("📊 Criterios Financieros")
+min_roi = st.sidebar.slider("ROI Mínimo deseado (%)", 0.0, 100.0, 15.0)
 
-    cat_id = KEEPA_CATEGORIES.get(categoria)
-    if cat_id:
-        selection["rootCategory"] = cat_id
+st.sidebar.subheader("👥 Competencia y Dominio")
+min_sellers = st.sidebar.number_input("Min. Vendedores FBA", value=2)
+max_sellers = st.sidebar.number_input("Max. Vendedores FBA", value=20)
+max_amazon_share = st.sidebar.slider("Max % Buy Box de Amazon", 0.0, 100.0, 40.0)
 
-    query_json = json.dumps(selection)
-    url = f"https://api.keepa.com/query?key={api_key}&domain=1&selection={query_json}"
+st.sidebar.subheader("🚀 Demanda y Logística")
+max_bsr = st.sidebar.number_input("BSR Máximo", value=150000)
 
-    try:
-        response = requests.get(url, timeout=20)
-        data = response.json()
+# Main UI
+tab1, tab2 = st.tabs(["🌐 Buscador Global", "📄 Analizador de Catálogos"])
 
-        if "error" in data:
-            st.error(f"Error Keepa API: {data['error'].get('message', 'Clave inválida o sin créditos')}")
-            return pd.DataFrame()
+with tab1:
+    st.subheader("Búsqueda Inversa y Oportunidades")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        tipo_busqueda = st.radio("Tipo de Búsqueda", ["Global (Todo el Mercado)", "Por Marca Específica"])
+    with col2:
+        categoria = st.selectbox("Categoría de Amazon", ["Todas", "Electrónica", "Hogar y Cocina", "Oficina", "Juguetes"])
+    
+    col3, col4 = st.columns(2)
+    with col3:
+        min_precio = st.number_input("Precio Venta Mínimo ($)", value=15.0)
+    with col4:
+        max_precio = st.number_input("Precio Venta Máximo ($)", value=250.0)
 
-        asin_list = data.get("asinList", [])
+    marca_txt = ""
+    if tipo_busqueda == "Por Marca Específica":
+        marca_txt = st.text_input("Nombre de la Marca", value="Logitech")
 
-        if not asin_list:
-            st.warning("Keepa no devolvió productos con estos parámetros. Intenta ampliar los rangos.")
-            return pd.DataFrame()
+    modo_str = "MARCA" if tipo_busqueda == "Por Marca Específica" else "GLOBAL"
 
-        # Detalle de los primeros 15 ASINs encontrados
-        asins_str = ",".join(asin_list[:15])
-        prod_url = f"https://api.keepa.com/product?key={api_key}&domain=1&asin={asins_str}&stats=90"
-        
-        prod_resp = requests.get(prod_url, timeout=20)
-        prod_data = prod_resp.json()
+    if st.button("🔍 Escanear Oportunidades"):
+        if not api_key:
+            st.error("Por favor, ingresa tu API Key de Keepa en el panel lateral.")
+        else:
+            with st.spinner("Consultando la API de Keepa..."):
+                df_resultados = ejecutar_busqueda_inversa(
+                    marca=marca_txt,
+                    categoria=categoria,
+                    modo=modo_str,
+                    api_key=api_key,
+                    min_roi=min_roi,
+                    max_bsr=max_bsr,
+                    min_precio=min_precio,
+                    max_precio=max_precio,
+                    min_sellers=min_sellers,
+                    max_sellers=max_sellers,
+                    max_amazon_share=max_amazon_share
+                )
 
-        productos = []
-        for prod in prod_data.get("products", []):
-            asin = prod.get("asin", "N/A")
-            title = prod.get("title", "Sin Título")
-            
-            stats = prod.get("stats", {})
-            current_price = stats.get("buyBoxPriceMin", 0) or 0
-            buybox_price = current_price / 100.0 if current_price > 0 else min_precio
-
-            costo_est = buybox_price * 0.50
-            fba_fee = buybox_price * 0.15 + prep_fee + inbound_fee
-            ganancia = buybox_price - costo_est - fba_fee
-            roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0
-
-            productos.append({
-                "ASIN": asin,
-                "Producto": title[:55] + "...",
-                "Precio Venta ($)": round(buybox_price, 2),
-                "Costo Est. ($)": round(costo_est, 2),
-                "Ganancia Est. ($)": round(ganancia, 2),
-                "ROI Est. (%)": round(roi, 2),
-                "Enlace": f"https://www.amazon.com/dp/{asin}"
-            })
-
-        return pd.DataFrame(productos)
-
-    except Exception as e:
-        st.error(f"Error de conexión: {str(e)}")
-        return pd.DataFrame()
+                if not df_resultados.empty:
+                    st.success(f"¡Se encontraron {len(df_resultados)} productos!")
+                    st.dataframe(
+                        df_resultados,
+                        column_config={"Enlace": st.column_config.LinkColumn("Ver en Amazon")},
+                        use_container_width=True
+                    )
+                else:
+                    st.info("No se encontraron productos con la combinación de filtros actual.")
