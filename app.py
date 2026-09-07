@@ -1,117 +1,108 @@
-import streamlit as st
+import requests
 import pandas as pd
-import os
-from dotenv import load_dotenv
-from src.reverse_sourcing import ejecutar_busqueda_inversa
+import streamlit as st
 
-load_dotenv()
+KEEPA_CATEGORIES = {
+    "Todas": None,
+    "Electrónica": 172282,
+    "Hogar y Cocina": 1055398,
+    "Oficina": 1064954,
+    "Juguetes": 1657930
+}
 
-st.set_page_config(page_title='Amazon Wholesale Suite', page_icon='📦', layout='wide')
+def ejecutar_busqueda_inversa(
+    marca=None,
+    categoria="Todas",
+    modo="GLOBAL",
+    api_key="",
+    min_roi=25.0,
+    max_bsr=50000,
+    min_precio=15.0,
+    max_precio=150.0,
+    min_sellers=3,
+    max_sellers=12,
+    max_amazon_share=20.0,
+    min_drops=30,
+    usar_precio_90d=True,
+    solo_estandar=True,
+    prep_fee=1.50,
+    inbound_fee=0.50
+):
+    if not api_key:
+        st.error("No se proporcionó una Keepa API Key válida.")
+        return pd.DataFrame()
 
-# --- OBTENCIÓN SEGURA DE API KEY DE KEEPA ---
-# Busca en este orden: 1) Secrets de Streamlit Cloud, 2) Variables de Entorno (.env), 3) Texto Vacío
-default_api_key = ""
-try:
-    if "KEEPA_API_KEY" in st.secrets:
-        default_api_key = st.secrets["KEEPA_API_KEY"]
-    else:
-        default_api_key = os.getenv('KEEPA_API_KEY', '')
-except Exception:
-    default_api_key = os.getenv('KEEPA_API_KEY', '')
+    # Construcción de parámetros para Keepa Product Finder Query
+    selection = {
+        "current_NEW_gte": int(min_precio * 100),
+        "current_NEW_lte": int(max_precio * 100),
+        "salesRanks_60_lte": int(max_bsr),
+        "fbaOfferCount_gte": int(min_sellers),
+        "fbaOfferCount_lte": int(max_sellers),
+        "sort": [["salesRanks_60", "asc"]]
+    }
 
-# --- BARRA LATERAL CON EXPLICACIONES (HELP TOOLTIPS) ---
-st.sidebar.title('⚙️ Filtros Profesionales Wholesale')
-api_key = st.sidebar.text_input(
-    'Keepa API Key', 
-    value=default_api_key, 
-    type='password', 
-    help='Tu clave de API de Keepa cargada automáticamente o ingresada manualmente para consultar datos en tiempo real de Amazon USA.'
-)
+    if modo == "MARCA" and marca:
+        selection["title"] = marca
 
-st.sidebar.subheader('📊 Criterios Financieros')
-min_roi = st.sidebar.slider('ROI Mínimo deseado (%)', 10.0, 60.0, float(os.getenv('MIN_ROI', 25.0)), help='Retorno de inversión mínimo aceptable tras descontar costo del producto, tarifas de Amazon FBA y costo del Prep Center.')
-usar_precio_90d = st.sidebar.checkbox('Usar Precio Promedio Buy Box 90 días', value=True, help='RECOMENDADO: Protege tus cálculos calculando el ROI con el precio histórico de 90 días en lugar del precio actual, evitando picos o desplomes temporales.')
+    cat_id = KEEPA_CATEGORIES.get(categoria)
+    if cat_id:
+        selection["rootCategory"] = cat_id
 
-st.sidebar.subheader('👥 Competencia y Dominio')
-col_s1, col_s2 = st.sidebar.columns(2)
-with col_s1:
-    min_sellers = st.number_input('Min. Vendedores FBA', value=3, help='Filtro Anti-IP Claim: Si hay menos de 3 vendedores, la marca podría ser privada o enviar denuncias de propiedad intelectual.')
-with col_s2:
-    max_sellers = st.number_input('Max. Vendedores FBA', value=12, help='Filtro Anti-Guerra de Precios: Más de 12 o 15 vendedores genera competencia desmedida y destrucción de márgenes por repricers.')
+    import json
+    query_json = json.dumps(selection)
 
-max_amazon_share = st.sidebar.slider('Max % Buy Box de Amazon', 0.0, 50.0, 20.0, help='Filtro Anti-Monopolio: Si Amazon gana la Buy Box más del 20% del tiempo, no dejará suficiente rotación para tu inventario.')
+    url = f"https://api.keepa.com/query?key={api_key}&domain=1&selection={query_json}"
 
-st.sidebar.subheader('🚀 Demanda y Logística')
-max_bsr = st.sidebar.number_input('BSR Máximo (Top Rank)', value=int(os.getenv('MAX_BSR_90', 50000)), help='Mejor Clasificación de Ventas. Mide la velocidad general del producto (cuanto menor el número, más rápido se vende).')
-min_drops = st.sidebar.number_input('Min. Drops BSR / mes', value=30, help='Caídas de BSR mensuales. Cada caída equivale a mínimo 1 venta. Asegura que el producto se venda constantemente.')
-solo_estandar = st.sidebar.checkbox('Excluir productos Oversize (Grandes/Pesados)', value=True, help='Filtro de Costo Logístico: Evita productos grandes o pesados que generan tarifas altas de almacenamiento y envío.')
+    try:
+        response = requests.get(url, timeout=20)
+        data = response.json()
 
-st.sidebar.markdown('---')
-st.sidebar.subheader('🚚 Logística Prep Center')
-prep_fee = st.sidebar.number_input('Costo Prep Center ($/ud)', value=float(os.getenv('PREP_CENTER_FEE', 1.50)), help='Tarifa por inspección, empaque y etiquetado FNSKU en tu centro de preparación.')
-inbound_fee = st.sidebar.number_input('Envío Inbound FBA ($/ud)', value=float(os.getenv('INBOUND_SHIPPING_FEE', 0.50)), help='Tarifa estimada de envío consolidado por UPS desde tu Prep Center a bodegas de Amazon.')
+        if "error" in data:
+            st.error(f"Error Keepa: {data['error'].get('message', 'Clave inválida o sin tokens')}")
+            return pd.DataFrame()
 
-# --- CONTENIDO PRINCIPAL ---
-st.title('📦 Amazon Wholesale Finder')
-st.caption('Explorador inteligente de oportunidades globales con filtros avanzados')
+        asin_list = data.get("asinList", [])
 
-tab1, tab2 = st.tabs(['🌐 Buscador Global de Oportunidades', '📄 Analizador de Catálogos (Wholesale)'])
+        if not asin_list:
+            st.warning("Keepa no devolvió ASINs con esos criterios. Intenta ampliar los rangos.")
+            return pd.DataFrame()
 
-with tab1:
-    st.header('Búsqueda Inversa y Oportunidades de Mercado')
-    
-    col_modo, col_cat = st.columns([1, 1])
-    with col_modo:
-        tipo_busqueda = st.radio('Tipo de Búsqueda', ['🌐 Global (Todo el Mercado)', '🏷️ Por Marca Específica'], horizontal=True)
-    with col_cat:
-        categoria_sel = st.selectbox('Categoría de Amazon', ['Todas', 'Electrónica', 'Hogar y Cocina', 'Oficina', 'Juguetes'])
+        # Obtener los primeros 15 productos encontrados
+        asins_str = ",".join(asin_list[:15])
+        prod_url = f"https://api.keepa.com/product?key={api_key}&domain=1&asin={asins_str}&stats=90"
         
-    marca_input = None
-    if tipo_busqueda == '🏷️ Por Marca Específica':
-        marca_input = st.text_input('Escribe el nombre de la Marca', 'Logitech')
-        
-    col_p1, col_p2, col_btn = st.columns([1, 1, 1])
-    with col_p1:
-        min_p = st.number_input('Precio Venta Mínimo ($)', value=15.0, help='Evita productos de bajo precio donde las tarifas fijas de Amazon absorben la ganancia.')
-    with col_p2:
-        max_p = st.number_input('Precio Venta Máximo ($)', value=150.0)
-    with col_btn:
-        st.write('')
-        st.write('')
-        btn_buscar = st.button('🔍 Escanear Oportunidades')
-        
-    if btn_buscar:
-        modo_str = 'MARCA' if tipo_busqueda == '🏷️ Por Marca Específica' else 'GLOBAL'
-        with st.spinner('Escaneando el mercado aplicando filtros profesionales...'):
-            df_res = ejecutar_busqueda_inversa(
-                marca=marca_input,
-                categoria=categoria_sel,
-                modo=modo_str,
-                api_key=api_key,
-                min_roi=min_roi,
-                max_bsr=max_bsr,
-                min_precio=min_p,
-                max_precio=max_p,
-                min_sellers=min_sellers,
-                max_sellers=max_sellers,
-                max_amazon_share=max_amazon_share,
-                min_drops=min_drops,
-                usar_precio_90d=usar_precio_90d,
-                solo_estandar=solo_estandar,
-                prep_fee=prep_fee,
-                inbound_fee=inbound_fee
-            )
-            if df_res.empty:
-                st.warning('No se encontraron productos que cumplan con TODOS los criterios de seguridad y ROI seleccionados.')
-            else:
-                st.success(f'¡Se encontraron {len(df_res)} oportunidades altamente rentables y seguras!')
-                st.dataframe(df_res)
-                
-                csv = df_res.to_csv(index=False).encode('utf-8')
-                st.download_button('📥 Descargar Oportunidades (CSV)', data=csv, file_name='oportunidades_wholesale.csv', mime='text/csv')
+        prod_resp = requests.get(prod_url, timeout=20)
+        prod_data = prod_resp.json()
 
-with tab2:
-    st.header('Análisis de Catálogo de Proveedor')
-    uploaded_file = st.file_uploader('Sube el archivo CSV del mayorista', type=['csv'])
-    if uploaded_file is not None:
-        st.info('Módulo listo para procesar listas con los nuevos criterios.')
+        productos = []
+        for prod in prod_data.get("products", []):
+            asin = prod.get("asin", "N/A")
+            title = prod.get("title", "Sin Título")
+            
+            # Obtener precio Buy Box o Precio Nuevo
+            stats = prod.get("stats", {})
+            current_price = stats.get("buyBoxPriceMin", 0) or stats.get("current", [0]*10)[1] or 0
+            buybox_price = current_price / 100.0 if current_price > 0 else min_precio
+
+            # Estimación referencial de costo mayorista (50% del PVP)
+            costo_est = buybox_price * 0.50
+            fba_fee = buybox_price * 0.15 + prep_fee + inbound_fee
+            ganancia = buybox_price - costo_est - fba_fee
+            roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0
+
+            productos.append({
+                "ASIN": asin,
+                "Producto": title[:55] + "...",
+                "Precio Venta ($)": round(buybox_price, 2),
+                "Costo Est. ($)": round(costo_est, 2),
+                "Ganancia Est. ($)": round(ganancia, 2),
+                "ROI Est. (%)": round(roi, 2),
+                "Enlace": f"https://www.amazon.com/dp/{asin}"
+            })
+
+        return pd.DataFrame(productos)
+
+    except Exception as e:
+        st.error(f"Error de conexión: {str(e)}")
+        return pd.DataFrame()
