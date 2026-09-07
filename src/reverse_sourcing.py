@@ -1,108 +1,104 @@
-import os
-import requests
 import json
+import requests
 import pandas as pd
+import streamlit as st
 
-def ejecutar_busqueda_inversa(marca=None, categoria='Todas', modo='GLOBAL', api_key='', min_roi=25.0, max_bsr=50000, min_precio=15.0, max_precio=100.0, min_sellers=3, max_sellers=12, max_amazon_share=20.0, min_drops=30, usar_precio_90d=True, solo_estandar=True, prep_fee=1.50, inbound_fee=0.50):
-    
-    # Si no hay API Key o es la clave por defecto, avisamos al usuario
-    if not api_key or len(api_key.strip()) < 15 or 'tu_keepa' in api_key:
-        print('[!] Sin API Key valida. Mostrando lista de prueba estatica.')
-        # Retornar una lista de aviso en el DataFrame
-        return pd.DataFrame([{
-            'ASIN': 'CONFIGURACION_REQUERIDA',
-            'Marca': 'SISTEMA',
-            'Categoría': 'N/A',
-            'Titulo': 'INGRESA TU KEEPA API KEY VALIDA EN LA BARRA LATERAL PARA BUSCAR EN AMAZON REAL',
-            'Precio Ref.': '$0.00',
-            'BSR 90d': 0,
-            'Vendedores FBA': 0,
-            'BuyBox Amazon %': '0%',
-            'Ventas Est./Mes': 0,
-            'Tu Cuota Est.': '0 uds',
-            'Costo Max Compra': '$0.00',
-            'Ganancia Est.': '$0.00',
-            'ROI Target': f'{min_roi}%'
-        }])
-        
-    print('[+] Consultando servidor real de Keepa Product Finder...')
-    
-    # Estructura de consulta a la API de Keepa (Query Endpoint)
-    query_payload = {
-        'title': marca if (modo == 'MARCA' and marca) else '',
-        'salesRank90DaysMin': 1,
-        'salesRank90DaysMax': max_bsr,
-        'buyBoxMin': int(min_precio * 100),
-        'buyBoxMax': int(max_precio * 100),
-        'fbaSellerCountMin': min_sellers,
-        'fbaSellerCountMax': max_sellers,
-        'deltaLast30Days_DROPS_min': min_drops,
-        'isOversize': False if solo_estandar else None
+KEEPA_CATEGORIES = {
+    "Todas": None,
+    "Electrónica": 172282,
+    "Hogar y Cocina": 1055398,
+    "Oficina": 1064954,
+    "Juguetes": 1657930
+}
+
+def ejecutar_busqueda_inversa(
+    marca=None,
+    categoria="Todas",
+    modo="GLOBAL",
+    api_key="",
+    min_roi=25.0,
+    max_bsr=50000,
+    min_precio=15.0,
+    max_precio=150.0,
+    min_sellers=3,
+    max_sellers=12,
+    max_amazon_share=20.0,
+    min_drops=30,
+    usar_precio_90d=True,
+    solo_estandar=True,
+    prep_fee=1.50,
+    inbound_fee=0.50
+):
+    if not api_key:
+        st.error("No se proporcionó una Keepa API Key válida.")
+        return pd.DataFrame()
+
+    # Construcción limpia de parámetros para Keepa Product Finder
+    selection = {
+        "current_NEW_gte": int(min_precio * 100),
+        "current_NEW_lte": int(max_precio * 100),
+        "salesRanks_60_lte": int(max_bsr),
+        "fbaOfferCount_gte": int(min_sellers),
+        "fbaOfferCount_lte": int(max_sellers)
     }
-    
-    # URL del endpoint oficial de Query de Keepa
-    url_query = f'https://api.keepa.com/query?key={api_key.strip()}&domain=1'
-    
+
+    if modo == "MARCA" and marca:
+        selection["title"] = marca
+
+    cat_id = KEEPA_CATEGORIES.get(categoria)
+    if cat_id:
+        selection["rootCategory"] = cat_id
+
+    query_json = json.dumps(selection)
+    url = f"https://api.keepa.com/query?key={api_key}&domain=1&selection={query_json}"
+
     try:
-        response = requests.post(url_query, data=json.dumps(query_payload), headers={'Content-Type': 'application/json'})
+        response = requests.get(url, timeout=20)
         data = response.json()
-        
-        # Keepa devuelve una lista de ASINs reales coincidentes
-        asins_encontrados = data.get('asinList', [])
-        
-        if not asins_encontrados:
+
+        if "error" in data:
+            st.error(f"Error Keepa API: {data['error'].get('message', 'Clave inválida o sin créditos')}")
             return pd.DataFrame()
-            
-        # Consultar detalles de los primeros ASINs encontrados
-        asins_str = ','.join(asins_encontrados[:20]) # Limitamos a 20 para optimizar tokens
-        url_details = f'https://api.keepa.com/product?key={api_key.strip()}&domain=1&asin={asins_str}&stats=90'
-        res_details = requests.get(url_details).json()
+
+        asin_list = data.get("asinList", [])
+
+        if not asin_list:
+            st.warning("Keepa no devolvió productos con estos parámetros. Intenta ampliar los rangos.")
+            return pd.DataFrame()
+
+        # Detalle de los primeros 15 ASINs encontrados
+        asins_str = ",".join(asin_list[:15])
+        prod_url = f"https://api.keepa.com/product?key={api_key}&domain=1&asin={asins_str}&stats=90"
         
-        resultados = []
-        for prod in res_details.get('products', []):
-            asin = prod.get('asin', 'N/A')
-            title = prod.get('title', 'Producto sin titulo')
-            brand = prod.get('brand', 'Generico')
-            cat = prod.get('categoryTree', [{'name': 'General'}])[-1]['name'] if prod.get('categoryTree') else 'General'
+        prod_resp = requests.get(prod_url, timeout=20)
+        prod_data = prod_resp.json()
+
+        productos = []
+        for prod in prod_data.get("products", []):
+            asin = prod.get("asin", "N/A")
+            title = prod.get("title", "Sin Título")
             
-            # Extraccion de precios desde stats de Keepa
-            stats = prod.get('stats', {})
-            buybox_price = (stats.get('buyBoxPrice', 0) or 0) / 100.0
-            buybox_90d = (stats.get('avg90', [0]*30)[18] or 0) / 100.0 if stats.get('avg90') else buybox_price
-            
-            precio_ref = buybox_90d if (usar_precio_90d and buybox_90d > 0) else buybox_price
-            if precio_ref <= 0:
-                continue
-                
-            bsr = stats.get('current', [0]*5)[3] or 999999
-            fba_sellers = stats.get('current', [0]*20)[11] or 1
-            amazon_share = stats.get('buyBoxSellerIdHistory', []).count('ATVPDKIKX0DER') # ID de Amazon.com
-            
-            fba_fee = precio_ref * 0.35
-            costos_logistica_prep = prep_fee + inbound_fee
-            costo_max_permitido = (precio_ref - fba_fee - costos_logistica_prep) / (1 + (min_roi / 100))
-            ganancia_estimada = (precio_ref - fba_fee - costos_logistica_prep) - costo_max_permitido
-            
-            tu_cuota_ventas = int(100 / (fba_sellers + 1))
-            
-            resultados.append({
-                'ASIN': asin,
-                'Marca': brand,
-                'Categoría': cat,
-                'Titulo': title[:50] + '...',
-                'Precio Ref.': f'${precio_ref:.2f}',
-                'BSR 90d': bsr,
-                'Vendedores FBA': fba_sellers,
-                'BuyBox Amazon %': f'{amazon_share}%',
-                'Ventas Est./Mes': 'Varias',
-                'Tu Cuota Est.': f'~{tu_cuota_ventas} uds/mes',
-                'Costo Max Compra': f'${costo_max_permitido:.2f}',
-                'Ganancia Est.': f'${ganancia_estimada:.2f}',
-                'ROI Target': f'{min_roi}%'
+            stats = prod.get("stats", {})
+            current_price = stats.get("buyBoxPriceMin", 0) or 0
+            buybox_price = current_price / 100.0 if current_price > 0 else min_precio
+
+            costo_est = buybox_price * 0.50
+            fba_fee = buybox_price * 0.15 + prep_fee + inbound_fee
+            ganancia = buybox_price - costo_est - fba_fee
+            roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0
+
+            productos.append({
+                "ASIN": asin,
+                "Producto": title[:55] + "...",
+                "Precio Venta ($)": round(buybox_price, 2),
+                "Costo Est. ($)": round(costo_est, 2),
+                "Ganancia Est. ($)": round(ganancia, 2),
+                "ROI Est. (%)": round(roi, 2),
+                "Enlace": f"https://www.amazon.com/dp/{asin}"
             })
-            
-        return pd.DataFrame(resultados)
-        
+
+        return pd.DataFrame(productos)
+
     except Exception as e:
-        print(f'[Error Keepa API]: {e}')
+        st.error(f"Error de conexión: {str(e)}")
         return pd.DataFrame()
