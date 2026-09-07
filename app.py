@@ -1,3 +1,4 @@
+import json
 import requests
 import pandas as pd
 import streamlit as st
@@ -32,14 +33,13 @@ def ejecutar_busqueda_inversa(
         st.error("No se proporcionó una Keepa API Key válida.")
         return pd.DataFrame()
 
-    # Construcción de parámetros para Keepa Product Finder Query
+    # Construcción limpia de parámetros para Keepa Product Finder
     selection = {
         "current_NEW_gte": int(min_precio * 100),
         "current_NEW_lte": int(max_precio * 100),
         "salesRanks_60_lte": int(max_bsr),
         "fbaOfferCount_gte": int(min_sellers),
-        "fbaOfferCount_lte": int(max_sellers),
-        "sort": [["salesRanks_60", "asc"]]
+        "fbaOfferCount_lte": int(max_sellers)
     }
 
     if modo == "MARCA" and marca:
@@ -49,9 +49,7 @@ def ejecutar_busqueda_inversa(
     if cat_id:
         selection["rootCategory"] = cat_id
 
-    import json
     query_json = json.dumps(selection)
-
     url = f"https://api.keepa.com/query?key={api_key}&domain=1&selection={query_json}"
 
     try:
@@ -59,16 +57,16 @@ def ejecutar_busqueda_inversa(
         data = response.json()
 
         if "error" in data:
-            st.error(f"Error Keepa: {data['error'].get('message', 'Clave inválida o sin tokens')}")
+            st.error(f"Error Keepa API: {data['error'].get('message', 'Clave inválida o sin créditos')}")
             return pd.DataFrame()
 
         asin_list = data.get("asinList", [])
 
         if not asin_list:
-            st.warning("Keepa no devolvió ASINs con esos criterios. Intenta ampliar los rangos.")
+            st.warning("Keepa no devolvió productos con estos parámetros. Intenta ampliar los rangos.")
             return pd.DataFrame()
 
-        # Obtener los primeros 15 productos encontrados
+        # Detalle de los primeros 15 ASINs encontrados
         asins_str = ",".join(asin_list[:15])
         prod_url = f"https://api.keepa.com/product?key={api_key}&domain=1&asin={asins_str}&stats=90"
         
@@ -80,12 +78,10 @@ def ejecutar_busqueda_inversa(
             asin = prod.get("asin", "N/A")
             title = prod.get("title", "Sin Título")
             
-            # Obtener precio Buy Box o Precio Nuevo
             stats = prod.get("stats", {})
-            current_price = stats.get("buyBoxPriceMin", 0) or stats.get("current", [0]*10)[1] or 0
+            current_price = stats.get("buyBoxPriceMin", 0) or 0
             buybox_price = current_price / 100.0 if current_price > 0 else min_precio
 
-            # Estimación referencial de costo mayorista (50% del PVP)
             costo_est = buybox_price * 0.50
             fba_fee = buybox_price * 0.15 + prep_fee + inbound_fee
             ganancia = buybox_price - costo_est - fba_fee
