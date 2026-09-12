@@ -11,6 +11,8 @@ KEEPA_CATEGORIES = {
     "Juguetes": 1657930
 }
 
+MARCAS_AMAZON_PRIVADAS = ["amazon", "amazon basics", "amazonbasics", "amazon essentials", "solimo"]
+
 def ejecutar_busqueda_inversa(
     marca="",
     categoria="Todas",
@@ -61,8 +63,8 @@ def ejecutar_busqueda_inversa(
             st.warning("Keepa no devolvió productos con estos parámetros de búsqueda.")
             return pd.DataFrame()
 
-        # Consultar detalles y estadísticas de los primeros 20 ASINs
-        asins_str = ",".join(asin_list[:20])
+        # Consultar detalles y estadísticas de los primeros 25 ASINs
+        asins_str = ",".join(asin_list[:25])
         prod_url = f"https://api.keepa.com/product?key={api_key}&domain=1&asin={asins_str}&stats=90&offers=20"
         
         prod_resp = requests.get(prod_url, timeout=20)
@@ -72,27 +74,52 @@ def ejecutar_busqueda_inversa(
         for prod in prod_data.get("products", []):
             asin = prod.get("asin", "N/A")
             title = prod.get("title", "Sin Título")
-            brand = prod.get("brand", "Desconocida")
-            
+            brand = prod.get("brand", "Desconocida").strip()
+            brand_lower = brand.lower()
+
+            # 1. Filtrar Marcas Propias de Amazon automáticamente
+            if any(amz_brand in brand_lower for amz_brand in MARCAS_AMAZON_PRIVADAS):
+                continue
+
             stats = prod.get("stats", {})
+            
+            # Conteo real de Vendedores FBA / FBM desde Keepa
+            fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
+            fbm_count = prod.get("fbmOfferCount", 0) or (stats.get("retrievedOfferCount", 0) - fba_count)
+            fbm_count = max(0, fbm_count)
+            total_sellers = fba_count + fbm_count
+
+            # Validación de cantidad mínima/máxima de vendedores FBA
+            if fba_count < min_sellers or fba_count > max_sellers:
+                continue
+
+            # Obtener datos de la Buy Box
             current_price = stats.get("buyBoxPriceMin", 0) or 0
             buybox_price = current_price / 100.0 if current_price > 0 else min_precio
 
-            # Métrica de BSR Promedio y Ventas Mensuales
+            # Extraer el vendedor actual o previo de la Buy Box
+            current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
+            if not current_seller_name and "buyBoxSellerIdHistory" in stats:
+                history = stats.get("buyBoxSellerIdHistory", [])
+                if history:
+                    current_seller_name = str(history[-1])
+
+            # 2. Exclusión de Dominio Directo del Fabricante
+            if excluir_propia_marca:
+                # Si el vendedor coincide con la marca o el vendedor dice "Amazon" / "Owala"
+                seller_lower = current_seller_name.lower().strip()
+                if brand_lower and seller_lower and (brand_lower in seller_lower or seller_lower in brand_lower):
+                    continue
+                if "amazon" in seller_lower or "owala" in seller_lower:
+                    continue
+
+            # Métricas de rendimiento
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else max_bsr
             monthly_sold = prod.get("boughtInPastMonth", 0)
 
-            # Nombre/Vendedor de la Buy Box
-            current_seller_name = stats.get("buyBoxCurrentSellerName", "N/A")
-
-            # Filtro contra Venta Directa del Fabricante / Marca
-            if excluir_propia_marca and brand and current_seller_name:
-                if brand.lower().strip() in current_seller_name.lower().strip():
-                    continue
-
             # Estimaciones Financieras (Margen / ROI)
             costo_est = buybox_price * 0.50
-            fba_fee = buybox_price * 0.15 + 2.00  # Estimación logística base
+            fba_fee = buybox_price * 0.15 + 2.00  # Fee estimado
             ganancia = buybox_price - costo_est - fba_fee
             roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0
 
@@ -101,9 +128,12 @@ def ejecutar_busqueda_inversa(
 
             productos.append({
                 "ASIN": asin,
-                "Producto": title[:45] + "...",
+                "Producto": title[:40] + "...",
                 "Marca": brand,
-                "Vendedor BuyBox": current_seller_name[:20],
+                "Vend. FBA": fba_count,
+                "Vend. FBM": fbm_count,
+                "Total Vend.": total_sellers,
+                "Vendedor BuyBox": current_seller_name[:18] if current_seller_name else "Multivendedor",
                 "BSR 90d": bsr_90 if bsr_90 > 0 else "N/A",
                 "Ventas/Mes": monthly_sold,
                 "P. Venta ($)": round(buybox_price, 2),
