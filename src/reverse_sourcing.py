@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 KEEPA_CATEGORIES = {
-    "Todas": None,
+    "Todas": 1055398,  # Si selecciona 'Todas', se asigna Hogar y Cocina por defecto para forzar resultados
     "Electrónica": 172282,
     "Hogar y Cocina": 1055398,
     "Oficina": 1064954,
@@ -18,7 +18,6 @@ MARCAS_AMAZON_PRIVADAS = [
 ]
 
 def normalizar_texto(texto: str) -> str:
-    """Limpia cadenas para comparaciones de marca y vendedor."""
     if not texto:
         return ""
     texto = texto.lower()
@@ -28,7 +27,6 @@ def normalizar_texto(texto: str) -> str:
     return " ".join(tokens)
 
 def es_dominada_por_fabricante(brand: str, seller_name: str) -> bool:
-    """Detecta si la Buy Box la domina el propio fabricante."""
     if not brand or not seller_name:
         return False
     
@@ -67,21 +65,19 @@ def ejecutar_busqueda_inversa(
         st.error("No se proporcionó una Keepa API Key válida.")
         return pd.DataFrame()
 
-    # 1. Consulta limpia y compatible para el Product Finder de Keepa
+    # Determinar la categoría (si es 'Todas', usará el cat_id asignado)
+    cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
+
+    # 1. Query estricta nativa Keepa
     selection = {
+        "rootCategory": cat_id,
         "current_NEW_gte": int(min_precio * 100),
         "current_NEW_lte": int(max_precio * 100),
-        "salesRanks_60_lte": int(max_bsr),
-        "fbaOfferCount_gte": int(min_sellers),
-        "fbaOfferCount_lte": int(max_sellers)
+        "salesRanks_60_lte": int(max_bsr)
     }
 
     if modo == "MARCA" and marca:
         selection["title"] = marca.strip()
-
-    cat_id = KEEPA_CATEGORIES.get(categoria)
-    if cat_id:
-        selection["rootCategory"] = cat_id
 
     query_json = json.dumps(selection)
     url = f"https://api.keepa.com/query?key={api_key}&domain=1&selection={query_json}"
@@ -96,26 +92,22 @@ def ejecutar_busqueda_inversa(
 
         asin_list = data.get("asinList", [])
 
-        # Fallback de consulta amplia si los filtros son estrictos
+        # 2. Query de respaldo súper amplia si la primera no arroja ASINs
         if not asin_list:
             selection_flex = {
+                "rootCategory": cat_id,
                 "current_NEW_gte": int(min_precio * 100),
                 "current_NEW_lte": int(max_precio * 100)
             }
-            if cat_id:
-                selection_flex["rootCategory"] = cat_id
-            if modo == "MARCA" and marca:
-                selection_flex["title"] = marca.strip()
-
             url_flex = f"https://api.keepa.com/query?key={api_key}&domain=1&selection={json.dumps(selection_flex)}"
             resp_flex = requests.get(url_flex, timeout=25)
             asin_list = resp_flex.json().get("asinList", [])
 
         if not asin_list:
-            st.warning("Keepa no devolvió productos. Prueba ampliando el rango de precios o cambiando la categoría.")
+            st.warning("Keepa no devolvió productos. Prueba seleccionando una categoría específica como 'Electrónica' o 'Juguetes'.")
             return pd.DataFrame()
 
-        # 2. Consultar datos detallados para los primeros 30 ASINs
+        # 3. Solicitar detalles completos de los ASINs encontrados
         asins_str = ",".join(asin_list[:30])
         prod_url = f"https://api.keepa.com/product?key={api_key}&domain=1&asin={asins_str}&stats=90&offers=20"
         
@@ -129,27 +121,30 @@ def ejecutar_busqueda_inversa(
             brand = (prod.get("brand") or "Desconocida").strip()
             brand_norm = normalizar_texto(brand)
 
-            # Excluir marcas privadas de Amazon
+            # A. Excluir marcas de Amazon
             if any(amz_brand in brand_norm for amz_brand in MARCAS_AMAZON_PRIVADAS):
                 continue
 
             stats = prod.get("stats", {})
 
-            # Vendedores
+            # B. Métricas de Vendedores (FBA / FBM)
             fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
             fbm_count = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_count))
             total_sellers = fba_count + fbm_count
 
-            if fba_count < min_sellers or fba_count > max_sellers:
+            # Filtrar por rango de vendedores FBA especificado por el usuario
+            if min_sellers > 0 and fba_count < min_sellers:
+                continue
+            if max_sellers > 0 and fba_count > max_sellers:
                 continue
 
-            # Precio Buy Box o precio actual
+            # C. Evaluación de la Buy Box
             current_price = stats.get("buyBoxPriceMin", 0) or stats.get("current", [0]*10)[1] or 0
             buybox_price = current_price / 100.0 if current_price > 0 else min_precio
 
             current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
 
-            # Exclusión de fabricante / Amazon
+            # D. Exclusión de Dominio del Fabricante o Amazon
             if excluir_propia_marca:
                 seller_norm = normalizar_texto(current_seller_name)
                 if es_dominada_por_fabricante(brand, current_seller_name):
@@ -157,11 +152,11 @@ def ejecutar_busqueda_inversa(
                 if "amazon" in seller_norm or "owala" in seller_norm:
                     continue
 
-            # BSR y Ventas
+            # E. Métricas de Rendimiento
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else max_bsr
             monthly_sold = prod.get("boughtInPastMonth", 0)
 
-            # Métricas Financieras
+            # F. Cálculos Financieros
             costo_est = buybox_price * 0.50
             fba_fee = buybox_price * 0.15 + 2.00
             ganancia = buybox_price - costo_est - fba_fee
