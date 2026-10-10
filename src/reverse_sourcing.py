@@ -12,57 +12,51 @@ KEEPA_CATEGORIES = {
     "Juguetes": 1657930
 }
 
-MARCAS_AMAZON_PRIVADAS = [
+# Marcas de Amazon y Marcas Directas/Fabricantes con Tienda Oficial / Control de Distribución
+MARCAS_EXCLUIDAS_DIRECTAS = [
+    # Marcas Propias de Amazon
     "amazon", "amazon basics", "amazonbasics", "amazon essentials", 
-    "solimo", "pinzon", "presto!", "mama bear", "happy belly"
+    "solimo", "pinzon", "presto!", "mama bear", "happy belly",
+    
+    # Grandes Fabricantes / Marcas con Tiendas Directas Dominantes (Gated / IP Risk)
+    "ugg", "shark", "ninja", "keurig", "levoit", "bissell", "yankee candle",
+    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius",
+    "hatch baby", "beckham hotel collection", "cgk unlimited", "lane linen",
+    "niagara sleep solution", "mellanni", "pampers", "huggies", "euhomy"
 ]
 
 def normalizar_texto(texto: str) -> str:
+    """Limpia cadenas para comparaciones homogéneas."""
     if not texto:
         return ""
     texto = texto.lower()
     texto = re.sub(r'[^a-z0-9\s]', '', texto)
-    palabras = ["inc", "llc", "corp", "co", "ltd", "store", "official", "direct", "us", "usa"]
-    return " ".join([w for w in texto.split() if w not in palabras])
+    palabras = ["inc", "llc", "corp", "co", "ltd", "store", "official", "direct", "us", "usa", "brand"]
+    tokens = [w for w in texto.split() if w not in palabras]
+    return " ".join(tokens)
 
-def es_dominada_por_fabricante(brand: str, seller_name: str) -> bool:
-    if not brand or not seller_name:
+def es_marca_excluida_o_fabricante(brand: str, seller_name: str) -> bool:
+    """Detecta si la marca del producto es una marca directa o el vendedor coincide con la marca."""
+    if not brand:
         return False
-    b_norm, s_norm = normalizar_texto(brand), normalizar_texto(seller_name)
-    if not b_norm or not s_norm:
-        return False
-    if b_norm in s_norm or s_norm in b_norm:
-        return True
-    coincidencias = set(b_norm.split()).intersection(set(s_norm.split()))
-    return any(len(w) > 3 for w in coincidencias)
+    
+    brand_norm = normalizar_texto(brand)
+    seller_norm = normalizar_texto(seller_name)
+    
+    # 1. Comprobar si la marca está en la lista de exclusión directa/fabricantes
+    for marca_bloqueada in MARCAS_EXCLUIDAS_DIRECTAS:
+        if marca_bloqueada in brand_norm or brand_norm in marca_bloqueada:
+            return True
+            
+    # 2. Comprobar si el vendedor coincide con la marca (si existe vendedor activo)
+    if seller_norm and brand_norm:
+        if brand_norm in seller_norm or seller_norm in brand_norm:
+            return True
+        coincidencias = set(brand_norm.split()).intersection(set(seller_norm.split()))
+        if any(len(w) > 3 for w in coincidencias):
+            return True
 
-def obtener_asins_keepa(clean_key: str, cat_id: int, modo: str, marca: str) -> list:
-    """Obtiene una lista garantizada de ASINs probando múltiples endpoints de Keepa."""
-    asin_list = []
-
-    # Intento 1: Consulta por Bestsellers de la Categoría
-    try:
-        bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
-        resp = requests.get(bs_url, timeout=15)
-        data = resp.json()
-        if "bestSellersList" in data and "asinList" in data["bestSellersList"]:
-            asin_list = data["bestSellersList"]["asinList"]
-    except Exception:
-        pass
-
-    # Intento 2: Si es por marca o falla la lista de Bestsellers, usamos la Búsqueda de Keepa
-    if not asin_list:
-        term = marca.strip() if (modo == "MARCA" and marca.strip()) else "best seller"
-        try:
-            search_url = f"https://api.keepa.com/search?key={clean_key}&domain=1&type=product&term={term}"
-            resp = requests.get(search_url, timeout=15)
-            data = resp.json()
-            if "products" in data:
-                asin_list = [p.get("asin") for p in data["products"] if p.get("asin")]
-        except Exception:
-            pass
-
-    return asin_list
+    return False
 
 def ejecutar_busqueda_inversa(
     marca="",
@@ -85,15 +79,43 @@ def ejecutar_busqueda_inversa(
 
     cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
 
-    # 1. Obtener ASINs mediante estrategia multi-endpoint
-    asin_list = obtener_asins_keepa(clean_key, cat_id, modo, marca)
+    # Estado de Tokens
+    try:
+        t_resp = requests.get(f"https://api.keepa.com/tokens?key={clean_key}", timeout=10).json()
+        if "tokensLeft" in t_resp:
+            st.info(f"🔑 Estado API Keepa: {t_resp['tokensLeft']} tokens disponibles.")
+            if t_resp["tokensLeft"] <= 0:
+                st.error("Tu API Key de Keepa no tiene tokens disponibles actualmente.")
+                return pd.DataFrame()
+    except Exception:
+        pass
+
+    # Estrategia de recuperación de ASINs
+    asin_list = []
+    try:
+        bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
+        resp = requests.get(bs_url, timeout=15).json()
+        if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
+            asin_list = resp["bestSellersList"]["asinList"]
+    except Exception:
+        pass
 
     if not asin_list:
-        st.warning("No se pudieron recuperar ASINs de Keepa. Verifica los créditos de tu API Key.")
+        term = marca.strip() if (modo == "MARCA" and marca.strip()) else "home"
+        try:
+            search_url = f"https://api.keepa.com/search?key={clean_key}&domain=1&type=product&term={term}"
+            resp = requests.get(search_url, timeout=15).json()
+            if "products" in resp:
+                asin_list = [p.get("asin") for p in resp["products"] if p.get("asin")]
+        except Exception:
+            pass
+
+    if not asin_list:
+        st.error("La API de Keepa no devolvió productos.")
         return pd.DataFrame()
 
-    # 2. Consultar datos y métricas detalladas para los ASINs obtenidos
-    asins_str = ",".join(asin_list[:40])
+    # Consulta de detalles
+    asins_str = ",".join(asin_list[:50])
     prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90&offers=20"
 
     try:
@@ -109,37 +131,27 @@ def ejecutar_busqueda_inversa(
             asin = prod.get("asin", "N/A")
             title = prod.get("title", "Sin Título")
             brand = (prod.get("brand") or "Desconocida").strip()
-            brand_norm = normalizar_texto(brand)
+            stats = prod.get("stats", {})
+            current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
 
-            # Excluir marcas privadas de Amazon
-            if any(amz in brand_norm for amz in MARCAS_AMAZON_PRIVADAS):
+            # FILTRO CLAVE: Excluir marcas de fabricante directo / tiendas oficiales
+            if excluir_propia_marca and es_marca_excluida_o_fabricante(brand, current_seller_name):
                 continue
 
-            stats = prod.get("stats", {})
-
-            # Obtener Precio
+            # Precio
             buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
             if buybox_cents <= 0 and "current" in stats and len(stats["current"]) > 1:
                 buybox_cents = stats["current"][1] or 0
 
             buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
 
-            # Vendedores FBA y FBM
+            # Vendedores FBA / FBM
             fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
             fbm_count = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_count))
             total_sellers = fba_count + fbm_count
 
             # BSR
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else 0
-
-            # Vendedor BuyBox
-            current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
-
-            # Exclusión de Fabricante Directo o Amazon
-            if excluir_propia_marca and current_seller_name:
-                seller_norm = normalizar_texto(current_seller_name)
-                if es_dominada_por_fabricante(brand, current_seller_name) or "amazon" in seller_norm or "owala" in seller_norm:
-                    continue
 
             # Métricas Financieras
             monthly_sold = prod.get("boughtInPastMonth", 0)
