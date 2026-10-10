@@ -13,14 +13,15 @@ KEEPA_CATEGORIES = {
 }
 
 MARCAS_EXCLUIDAS_DIRECTAS = [
-    "amazon", "amazon basics", "amazonbasics", "amazon essentials", 
-    "solimo", "pinzon", "presto!", "mama bear", "happy belly",
+    "amazon", "amazon basics", "amazonbasics", "amazon essentials", "solimo", "pinzon",
     "ugg", "shark", "ninja", "keurig", "levoit", "bissell", "yankee candle",
-    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius"
+    "black+decker", "black & decker", "black decker", "dewalt", "stanley", "craftsman",
+    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius",
+    "hatch baby", "beckham hotel collection", "cgk unlimited", "lane linen",
+    "niagara sleep solution", "mellanni", "pampers", "huggies", "euhomy", "upsimples", "bedlore"
 ]
 
 def normalizar_texto(texto: str) -> str:
-    """Limpia y normaliza texto para comparaciones de marcas y vendedores."""
     if not texto:
         return ""
     texto = texto.lower()
@@ -30,7 +31,6 @@ def normalizar_texto(texto: str) -> str:
     return " ".join(tokens)
 
 def es_marca_o_fabricante_directo(brand: str, seller_name: str, offers: list) -> bool:
-    """Detecta si la marca es el propio vendedor en Buy Box o en las ofertas activas."""
     if not brand:
         return False
 
@@ -38,12 +38,13 @@ def es_marca_o_fabricante_directo(brand: str, seller_name: str, offers: list) ->
     if not brand_norm:
         return False
 
-    # 1. Comprobar lista de marcas bloqueadas por defecto
+    # 1. Comprobar lista de marcas directas/protegidas
     for marca_bloqueada in MARCAS_EXCLUIDAS_DIRECTAS:
-        if marca_bloqueada in brand_norm or brand_norm in marca_bloqueada:
+        m_norm = normalizar_texto(marca_bloqueada)
+        if m_norm and (m_norm in brand_norm or brand_norm in m_norm):
             return True
 
-    # 2. Comprobar contra el vendedor actual de la Buy Box
+    # 2. Comprobar vendedor de la Buy Box
     seller_norm = normalizar_texto(seller_name)
     if seller_norm:
         if brand_norm in seller_norm or seller_norm in brand_norm:
@@ -52,13 +53,38 @@ def es_marca_o_fabricante_directo(brand: str, seller_name: str, offers: list) ->
         if any(len(w) > 3 for w in coincidencias):
             return True
 
-    # 3. Comprobar contra el listado de vendedores activos (offers)
+    # 3. Comprobar en ofertas activas NUEVAS
     for offer in offers:
-        s_name = normalizar_texto(offer.get("sellerName", ""))
-        if s_name and (brand_norm in s_name or s_name in brand_norm):
-            return True
+        # Evaluar solo ofertas en condición NUEVO (condition == 0 o isNew)
+        if offer.get("condition") == 0 or offer.get("isNew", True):
+            s_name = normalizar_texto(offer.get("sellerName", ""))
+            if s_name and (brand_norm in s_name or s_name in brand_norm):
+                return True
 
     return False
+
+def contar_vendedores_nuevos(prod: dict, stats: dict) -> tuple:
+    """Cuenta exclusivamente vendedores de productos NUEVOS (FBA y FBM)."""
+    offers = prod.get("offers", [])
+    
+    if offers:
+        fba_nuevos = 0
+        fbm_nuevos = 0
+        for offer in offers:
+            # Condición 0 en Keepa equivale a 'NEW'
+            is_new = (offer.get("condition") == 0) or offer.get("isNew", False)
+            if is_new:
+                if offer.get("isFBA", False):
+                    fba_nuevos += 1
+                else:
+                    fbm_nuevos += 1
+        if (fba_nuevos + fbm_nuevos) > 0:
+            return fba_nuevos, fbm_nuevos, (fba_nuevos + fbm_nuevos)
+
+    # Fallback si no viene el array de ofertas desglosado
+    fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
+    fbm_count = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_count))
+    return fba_count, fbm_count, (fba_count + fbm_count)
 
 def ejecutar_busqueda_inversa(
     marca="",
@@ -81,7 +107,7 @@ def ejecutar_busqueda_inversa(
 
     cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
 
-    # Verificación de tokens
+    # Verificación de tokens de Keepa
     try:
         t_resp = requests.get(f"https://api.keepa.com/tokens?key={clean_key}", timeout=10).json()
         if "tokensLeft" in t_resp:
@@ -92,7 +118,7 @@ def ejecutar_busqueda_inversa(
     except Exception:
         pass
 
-    # Estrategia de recuperación de ASINs
+    # Estrategia de búsqueda
     asin_list = []
     try:
         bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
@@ -103,7 +129,7 @@ def ejecutar_busqueda_inversa(
         pass
 
     if not asin_list:
-        term = marca.strip() if (modo == "MARCA" and marca.strip()) else "home"
+        term = marca.strip() if (modo == "MARCA" and marca.strip()) else "kitchen"
         try:
             search_url = f"https://api.keepa.com/search?key={clean_key}&domain=1&type=product&term={term}"
             resp = requests.get(search_url, timeout=15).json()
@@ -116,8 +142,8 @@ def ejecutar_busqueda_inversa(
         st.error("La API de Keepa no devolvió productos.")
         return pd.DataFrame()
 
-    # Consulta extendida con ofertas detalladas
-    asins_str = ",".join(asin_list[:50])
+    # Obtener detalles extendidos
+    asins_str = ",".join(asin_list[:60])
     prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90&offers=20"
 
     try:
@@ -136,34 +162,38 @@ def ejecutar_busqueda_inversa(
             stats = prod.get("stats", {})
             offers = prod.get("offers", [])
 
-            # 1. Contadores de Vendedores (FBA / FBM)
-            fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
-            fbm_count = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_count))
-            total_sellers = fba_count + fbm_count
+            # 1. Contar SOLO vendedores de productos NUEVOS
+            fba_nuevos, fbm_nuevos, total_nuevos = contar_vendedores_nuevos(prod, stats)
 
-            # REGLA WHOLESALE: Excluir si tiene menos vendedores que el mínimo permitido (Filtra Private Label)
-            if total_sellers < min_sellers:
+            # Filtro Wholesale: Excluir si NO hay suficientes vendedores en condición NUEVO
+            if total_nuevos < min_sellers:
                 continue
 
             # 2. Vendedor Buy Box
             current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
 
-            # REGLA WHOLESALE: Excluir marcas/fabricantes directos
+            # Exclusión de Marcas Directas / Fabricantes
             if excluir_propia_marca and es_marca_o_fabricante_directo(brand, current_seller_name, offers):
                 continue
 
-            # 3. Precio
+            # 3. Precio del producto NUEVO
             buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
             if buybox_cents <= 0 and "current" in stats and len(stats["current"]) > 1:
-                buybox_cents = stats["current"][1] or 0
+                buybox_cents = stats["current"][1] or 0  # Index 1 = New Price en Keepa
 
             buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
 
+            if buybox_price < min_precio or buybox_price > max_precio:
+                continue
+
             # 4. BSR y Ventas
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else 0
+            if max_bsr > 0 and bsr_90 > max_bsr:
+                continue
+
             monthly_sold = prod.get("boughtInPastMonth", 0)
 
-            # 5. Cálculos Financieros
+            # 5. Métricas Financieras
             costo_est = buybox_price * 0.50
             fba_fee = buybox_price * 0.15 + 2.00
             ganancia = buybox_price - costo_est - fba_fee
@@ -176,9 +206,9 @@ def ejecutar_busqueda_inversa(
                 "ASIN": asin,
                 "Producto": title[:40] + "...",
                 "Marca": brand,
-                "Vend. FBA": fba_count,
-                "Vend. FBM": fbm_count,
-                "Total Vend.": total_sellers,
+                "Vend. FBA (Nuevos)": fba_nuevos,
+                "Vend. FBM (Nuevos)": fbm_nuevos,
+                "Total Vend. Nuevos": total_nuevos,
                 "Vendedor BuyBox": current_seller_name[:20] if current_seller_name else "Multivendedor",
                 "BSR 90d": bsr_90 if bsr_90 > 0 else "N/A",
                 "Ventas/Mes": monthly_sold,
