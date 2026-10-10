@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 KEEPA_CATEGORIES = {
-    "Todas": None,
+    "Todas": 1055398,  # Hogar y Cocina por defecto para búsquedas globales
     "Hogar y Cocina": 1055398,
     "Electrónica": 172282,
     "Oficina": 1064954,
@@ -59,36 +59,19 @@ def es_marca_o_fabricante_directo(brand: str, seller_name: str, offers_nuevas: l
 
     return False
 
-def obtener_asins_robustivo(clean_key: str, cat_id, min_precio: float, max_precio: float, modo: str, marca: str) -> list:
+def obtener_asins_robustivo(clean_key: str, cat_id: int, min_precio: float, max_precio: float, modo: str, marca: str) -> list:
     asin_list = []
 
+    # Intento 1: API /bestsellers de la categoría
     try:
-        selection = {
-            "current_NEW_gte": int(min_precio * 100),
-            "current_NEW_lte": int(max_precio * 100),
-            "offerCount_gte": 2
-        }
-        if cat_id:
-            selection["rootCategory"] = cat_id
-        if modo == "MARCA" and marca.strip():
-            selection["title"] = marca.strip()
-
-        q_url = f"https://api.keepa.com/query?key={clean_key}&domain=1&selection={json.dumps(selection)}"
-        resp = requests.get(q_url, timeout=15).json()
-        if "asinList" in resp and resp["asinList"]:
-            asin_list = resp["asinList"]
+        bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
+        resp = requests.get(bs_url, timeout=15).json()
+        if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
+            asin_list = resp["bestSellersList"]["asinList"]
     except Exception:
         pass
 
-    if not asin_list and cat_id:
-        try:
-            bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
-            resp = requests.get(bs_url, timeout=15).json()
-            if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
-                asin_list = resp["bestSellersList"]["asinList"]
-        except Exception:
-            pass
-
+    # Intento 2: API /search por término
     if not asin_list:
         term = marca.strip() if (modo == "MARCA" and marca.strip()) else "home"
         try:
@@ -120,8 +103,9 @@ def ejecutar_busqueda_inversa(
         st.error("No se proporcionó una Keepa API Key válida.")
         return pd.DataFrame()
 
-    cat_id = KEEPA_CATEGORIES.get(categoria)
+    cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
 
+    # Verificación de tokens de la API
     try:
         t_resp = requests.get(f"https://api.keepa.com/tokens?key={clean_key}", timeout=10).json()
         if "tokensLeft" in t_resp:
@@ -135,10 +119,11 @@ def ejecutar_busqueda_inversa(
     asin_list = obtener_asins_robustivo(clean_key, cat_id, min_precio, max_precio, modo, marca)
 
     if not asin_list:
-        st.error("La API de Keepa no devolvió productos. Verifica tu saldo de tokens en Keepa.")
+        st.error("La API de Keepa no devolvió productos para la consulta.")
         return pd.DataFrame()
 
-    asins_str = ",".join(asin_list[:60])
+    # Procesar muestra de hasta 100 ASINs
+    asins_str = ",".join(asin_list[:100])
     prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90&offers=20"
 
     try:
@@ -157,6 +142,7 @@ def ejecutar_busqueda_inversa(
             stats = prod.get("stats", {})
             offers = prod.get("offers", [])
 
+            # 1. Contar ofertas en condición NUEVO
             offers_nuevas = []
             fba_nuevos = 0
             fbm_nuevos = 0
@@ -171,22 +157,24 @@ def ejecutar_busqueda_inversa(
                             fba_nuevos += 1
                         else:
                             fbm_nuevos += 1
-
                 total_nuevos = fba_nuevos + fbm_nuevos
             else:
                 fba_nuevos = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
-                fbm_count = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_nuevos))
-                fbm_nuevos = fbm_count
+                fbm_nuevos = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_nuevos))
                 total_nuevos = fba_nuevos + fbm_nuevos
 
+            # Excluir Private Label o listings sin competencia multivendedor de productos nuevos
             if total_nuevos < min_sellers:
                 continue
 
+            # 2. Vendedor de la Buy Box
             current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
 
+            # Excluir fabricantes y marcas directas
             if excluir_propia_marca and es_marca_o_fabricante_directo(brand, current_seller_name, offers_nuevas):
                 continue
 
+            # 3. Validar precio
             buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
             if buybox_cents <= 0 and "current" in stats and len(stats["current"]) > 1:
                 buybox_cents = stats["current"][1] or 0
@@ -196,12 +184,14 @@ def ejecutar_busqueda_inversa(
             if buybox_price < min_precio or buybox_price > max_precio:
                 continue
 
+            # 4. Ranking BSR
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else 0
             if max_bsr > 0 and bsr_90 > max_bsr:
                 continue
 
             monthly_sold = prod.get("boughtInPastMonth", 0)
 
+            # 5. Cálculos Financieros
             costo_est = buybox_price * 0.50
             fba_fee = buybox_price * 0.15 + 2.00
             ganancia = buybox_price - costo_est - fba_fee
