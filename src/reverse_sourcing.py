@@ -5,9 +5,9 @@ import pandas as pd
 import streamlit as st
 
 KEEPA_CATEGORIES = {
-    "Todas": 1055398,
-    "Electrónica": 172282,
+    "Todas": None,
     "Hogar y Cocina": 1055398,
+    "Electrónica": 172282,
     "Oficina": 1064954,
     "Juguetes": 1657930
 }
@@ -38,13 +38,13 @@ def es_marca_o_fabricante_directo(brand: str, seller_name: str, offers: list) ->
     if not brand_norm:
         return False
 
-    # 1. Comprobar lista de marcas directas/protegidas
+    # 1. Comprobar lista de marcas protegidas / directas
     for marca_bloqueada in MARCAS_EXCLUIDAS_DIRECTAS:
         m_norm = normalizar_texto(marca_bloqueada)
         if m_norm and (m_norm in brand_norm or brand_norm in m_norm):
             return True
 
-    # 2. Comprobar vendedor de la Buy Box
+    # 2. Comprobar vendedor en Buy Box
     seller_norm = normalizar_texto(seller_name)
     if seller_norm:
         if brand_norm in seller_norm or seller_norm in brand_norm:
@@ -53,10 +53,10 @@ def es_marca_o_fabricante_directo(brand: str, seller_name: str, offers: list) ->
         if any(len(w) > 3 for w in coincidencias):
             return True
 
-    # 3. Comprobar en ofertas activas NUEVAS
+    # 3. Comprobar ofertas activas en estado Nuevo
     for offer in offers:
-        # Evaluar solo ofertas en condición NUEVO (condition == 0 o isNew)
-        if offer.get("condition") == 0 or offer.get("isNew", True):
+        is_new = (offer.get("condition") == 0) or offer.get("isNew", False)
+        if is_new:
             s_name = normalizar_texto(offer.get("sellerName", ""))
             if s_name and (brand_norm in s_name or s_name in brand_norm):
                 return True
@@ -64,14 +64,13 @@ def es_marca_o_fabricante_directo(brand: str, seller_name: str, offers: list) ->
     return False
 
 def contar_vendedores_nuevos(prod: dict, stats: dict) -> tuple:
-    """Cuenta exclusivamente vendedores de productos NUEVOS (FBA y FBM)."""
+    """Cuenta exclusivamente vendedores con ofertas de productos NUEVOS."""
     offers = prod.get("offers", [])
     
     if offers:
         fba_nuevos = 0
         fbm_nuevos = 0
         for offer in offers:
-            # Condición 0 en Keepa equivale a 'NEW'
             is_new = (offer.get("condition") == 0) or offer.get("isNew", False)
             if is_new:
                 if offer.get("isFBA", False):
@@ -81,10 +80,55 @@ def contar_vendedores_nuevos(prod: dict, stats: dict) -> tuple:
         if (fba_nuevos + fbm_nuevos) > 0:
             return fba_nuevos, fbm_nuevos, (fba_nuevos + fbm_nuevos)
 
-    # Fallback si no viene el array de ofertas desglosado
     fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
     fbm_count = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_count))
     return fba_count, fbm_count, (fba_count + fbm_count)
+
+def obtener_asins_robustivo(clean_key: str, cat_id, min_precio: float, max_precio: float, modo: str, marca: str) -> list:
+    """Consigue ASINs garantizados probando /query, /bestsellers y /search."""
+    asin_list = []
+
+    # Estrategia 1: Query nativo de Keepa Product Finder por rango de precio y multidealer
+    try:
+        selection = {
+            "current_NEW_gte": int(min_precio * 100),
+            "current_NEW_lte": int(max_precio * 100),
+            "offerCount_gte": 2
+        }
+        if cat_id:
+            selection["rootCategory"] = cat_id
+        if modo == "MARCA" and marca.strip():
+            selection["title"] = marca.strip()
+
+        q_url = f"https://api.keepa.com/query?key={clean_key}&domain=1&selection={json.dumps(selection)}"
+        resp = requests.get(q_url, timeout=15).json()
+        if "asinList" in resp and resp["asinList"]:
+            asin_list = resp["asinList"]
+    except Exception:
+        pass
+
+    # Estrategia 2: Fallback por Bestsellers si Query no devuelve datos
+    if not asin_list and cat_id:
+        try:
+            bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
+            resp = requests.get(bs_url, timeout=15).json()
+            if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
+                asin_list = resp["bestSellersList"]["asinList"]
+        except Exception:
+            pass
+
+    # Estrategia 3: Búsqueda general por palabras clave
+    if not asin_list:
+        term = marca.strip() if (modo == "MARCA" and marca.strip()) else "home"
+        try:
+            search_url = f"https://api.keepa.com/search?key={clean_key}&domain=1&type=product&term={term}"
+            resp = requests.get(search_url, timeout=15).json()
+            if "products" in resp:
+                asin_list = [p.get("asin") for p in resp["products"] if p.get("asin")]
+        except Exception:
+            pass
+
+    return asin_list
 
 def ejecutar_busqueda_inversa(
     marca="",
@@ -105,9 +149,9 @@ def ejecutar_busqueda_inversa(
         st.error("No se proporcionó una Keepa API Key válida.")
         return pd.DataFrame()
 
-    cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
+    cat_id = KEEPA_CATEGORIES.get(categoria)
 
-    # Verificación de tokens de Keepa
+    # Verificación de saldo de tokens en la API
     try:
         t_resp = requests.get(f"https://api.keepa.com/tokens?key={clean_key}", timeout=10).json()
         if "tokensLeft" in t_resp:
@@ -118,31 +162,14 @@ def ejecutar_busqueda_inversa(
     except Exception:
         pass
 
-    # Estrategia de búsqueda
-    asin_list = []
-    try:
-        bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
-        resp = requests.get(bs_url, timeout=15).json()
-        if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
-            asin_list = resp["bestSellersList"]["asinList"]
-    except Exception:
-        pass
+    # Recuperación multiestrategia de ASINs
+    asin_list = obtener_asins_robustivo(clean_key, cat_id, min_precio, max_precio, modo, marca)
 
     if not asin_list:
-        term = marca.strip() if (modo == "MARCA" and marca.strip()) else "kitchen"
-        try:
-            search_url = f"https://api.keepa.com/search?key={clean_key}&domain=1&type=product&term={term}"
-            resp = requests.get(search_url, timeout=15).json()
-            if "products" in resp:
-                asin_list = [p.get("asin") for p in resp["products"] if p.get("asin")]
-        except Exception:
-            pass
-
-    if not asin_list:
-        st.error("La API de Keepa no devolvió productos.")
+        st.error("La API de Keepa no devolvió productos. Verifica tu saldo de tokens en Keepa.")
         return pd.DataFrame()
 
-    # Obtener detalles extendidos
+    # Consulta extendida de hasta 60 productos
     asins_str = ",".join(asin_list[:60])
     prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90&offers=20"
 
@@ -162,10 +189,10 @@ def ejecutar_busqueda_inversa(
             stats = prod.get("stats", {})
             offers = prod.get("offers", [])
 
-            # 1. Contar SOLO vendedores de productos NUEVOS
+            # 1. Contar SOLO vendedores con ofertas NUEVAS
             fba_nuevos, fbm_nuevos, total_nuevos = contar_vendedores_nuevos(prod, stats)
 
-            # Filtro Wholesale: Excluir si NO hay suficientes vendedores en condición NUEVO
+            # Filtro de competencia Wholesale (mínimo de vendedores en estado Nuevo)
             if total_nuevos < min_sellers:
                 continue
 
@@ -179,7 +206,7 @@ def ejecutar_busqueda_inversa(
             # 3. Precio del producto NUEVO
             buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
             if buybox_cents <= 0 and "current" in stats and len(stats["current"]) > 1:
-                buybox_cents = stats["current"][1] or 0  # Index 1 = New Price en Keepa
+                buybox_cents = stats["current"][1] or 0
 
             buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
 
