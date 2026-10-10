@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 KEEPA_CATEGORIES = {
-    "Todas": 1055398,
+    "Todas": 1055398,  # Hogar y Cocina por defecto
     "Electrónica": 172282,
     "Hogar y Cocina": 1055398,
     "Oficina": 1064954,
@@ -54,11 +54,9 @@ def ejecutar_busqueda_inversa(
 
     cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
 
-    # Consulta básica a Keepa
+    # 1. Consulta pura por categoría para garantizar la devolución de ASINs
     selection = {
-        "rootCategory": cat_id,
-        "current_NEW_gte": int(min_precio * 100),
-        "current_NEW_lte": int(max_precio * 100)
+        "rootCategory": cat_id
     }
 
     if modo == "MARCA" and marca.strip():
@@ -77,11 +75,11 @@ def ejecutar_busqueda_inversa(
         asin_list = data.get("asinList", [])
 
         if not asin_list:
-            st.warning("Keepa no devolvió productos. Cambia la categoría a 'Electrónica' o 'Juguetes' para verificar.")
+            st.warning("Keepa no devolvió productos para esta consulta.")
             return pd.DataFrame()
 
-        # Obtener detalle de ASINs
-        asins_str = ",".join(asin_list[:40])
+        # 2. Consultar detalles completos y métricas de hasta 50 productos
+        asins_str = ",".join(asin_list[:50])
         prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90"
         
         prod_resp = requests.get(prod_url, timeout=20)
@@ -93,29 +91,40 @@ def ejecutar_busqueda_inversa(
             title = prod.get("title", "Sin Título")
             brand = (prod.get("brand") or "Desconocida").strip()
 
+            # A. Excluir marcas privadas de Amazon
             if any(amz in normalizar_texto(brand) for amz in MARCAS_AMAZON_PRIVADAS):
                 continue
 
             stats = prod.get("stats", {})
+
+            # B. Precio Buy Box / Actual
+            current_price = stats.get("buyBoxPriceMin", 0) or stats.get("current", [0]*10)[1] or 0
+            buybox_price = current_price / 100.0 if current_price > 0 else 0
+
+            # Validar rango de precios en Python
+            if buybox_price < min_precio or buybox_price > max_precio:
+                continue
+
+            # C. Vendedores FBA / FBM
             fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
             fbm_count = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_count))
             
             if fba_count < min_sellers or fba_count > max_sellers:
                 continue
 
+            # D. Ranking BSR 90 Días
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else 0
             if max_bsr > 0 and bsr_90 > max_bsr:
                 continue
 
-            current_price = stats.get("buyBoxPriceMin", 0) or stats.get("current", [0]*10)[1] or 0
-            buybox_price = current_price / 100.0 if current_price > 0 else min_precio
+            # E. Exclusión de Fabricante Directo o Amazon
             current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
-
             if excluir_propia_marca:
                 seller_norm = normalizar_texto(current_seller_name)
                 if es_dominada_por_fabricante(brand, current_seller_name) or "amazon" in seller_norm or "owala" in seller_norm:
                     continue
 
+            # F. Métricas Financieras y Ventas
             monthly_sold = prod.get("boughtInPastMonth", 0)
             costo_est = buybox_price * 0.50
             fba_fee = buybox_price * 0.15 + 2.00
