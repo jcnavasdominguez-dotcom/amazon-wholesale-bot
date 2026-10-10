@@ -18,7 +18,7 @@ MARCAS_AMAZON_PRIVADAS = [
 ]
 
 def normalizar_texto(texto: str) -> str:
-    """Limpia y normaliza cadenas para comparaciones precisas entre marca y vendedor."""
+    """Limpia cadenas para comparaciones de marca y vendedor."""
     if not texto:
         return ""
     texto = texto.lower()
@@ -28,7 +28,7 @@ def normalizar_texto(texto: str) -> str:
     return " ".join(tokens)
 
 def es_dominada_por_fabricante(brand: str, seller_name: str) -> bool:
-    """Determina si la Buy Box pertenece directamente al fabricante o dueño de la marca."""
+    """Detecta si la Buy Box la domina el propio fabricante."""
     if not brand or not seller_name:
         return False
     
@@ -41,30 +41,13 @@ def es_dominada_por_fabricante(brand: str, seller_name: str) -> bool:
     if brand_norm in seller_norm or seller_norm in brand_norm:
         return True
     
-    # Comprobar coincidencia por palabras clave
     brand_tokens = set(brand_norm.split())
     seller_tokens = set(seller_norm.split())
-    if brand_tokens and seller_tokens and len(brand_tokens.intersection(seller_tokens)) >= 1:
-        # Evitar falsos positivos en palabras comunes cortas
-        coincidencias = brand_tokens.intersection(seller_tokens)
-        if any(len(word) > 3 for word in coincidencias):
-            return True
+    coincidencias = brand_tokens.intersection(seller_tokens)
+    if any(len(word) > 3 for word in coincidencias):
+        return True
 
     return False
-
-def extraer_conteo_vendedores(prod: dict, stats: dict) -> tuple:
-    """Extrae con precisión el conteo de vendedores FBA, FBM y total desde el payload de Keepa."""
-    fba_count = prod.get("fbaOfferCount", 0)
-    if not fba_count or fba_count == 0:
-        fba_count = stats.get("retrievedOfferCountFBA", 0) or 0
-
-    total_retrieved = stats.get("retrievedOfferCount", 0) or 0
-    fbm_count = prod.get("fbmOfferCount", 0)
-    if not fbm_count or fbm_count == 0:
-        fbm_count = max(0, total_retrieved - fba_count)
-
-    total_sellers = fba_count + fbm_count
-    return fba_count, fbm_count, total_sellers
 
 def ejecutar_busqueda_inversa(
     marca="",
@@ -84,18 +67,17 @@ def ejecutar_busqueda_inversa(
         st.error("No se proporcionó una Keepa API Key válida.")
         return pd.DataFrame()
 
-    # 1. Parámetros de consulta principal en Keepa Product Finder API
+    # 1. Consulta limpia y compatible para el Product Finder de Keepa
     selection = {
-        "current_BUY_BOX_SHIPPING_gte": int(min_precio * 100),
-        "current_BUY_BOX_SHIPPING_lte": int(max_precio * 100),
-        "salesRank_gte": 1,
-        "salesRank_lte": int(max_bsr),
+        "current_NEW_gte": int(min_precio * 100),
+        "current_NEW_lte": int(max_precio * 100),
+        "salesRanks_60_lte": int(max_bsr),
         "fbaOfferCount_gte": int(min_sellers),
         "fbaOfferCount_lte": int(max_sellers)
     }
 
     if modo == "MARCA" and marca:
-        selection["title"] = marca
+        selection["title"] = marca.strip()
 
     cat_id = KEEPA_CATEGORIES.get(categoria)
     if cat_id:
@@ -114,29 +96,26 @@ def ejecutar_busqueda_inversa(
 
         asin_list = data.get("asinList", [])
 
-        # 2. Reintento secundario de respaldo en caso de cero resultados por Buy Box estricta
+        # Fallback de consulta amplia si los filtros son estrictos
         if not asin_list:
-            selection_alt = {
+            selection_flex = {
                 "current_NEW_gte": int(min_precio * 100),
-                "current_NEW_lte": int(max_precio * 100),
-                "salesRank_lte": int(max_bsr)
+                "current_NEW_lte": int(max_precio * 100)
             }
             if cat_id:
-                selection_alt["rootCategory"] = cat_id
+                selection_flex["rootCategory"] = cat_id
             if modo == "MARCA" and marca:
-                selection_alt["title"] = marca
+                selection_flex["title"] = marca.strip()
 
-            query_json_alt = json.dumps(selection_alt)
-            url_alt = f"https://api.keepa.com/query?key={api_key}&domain=1&selection={query_json_alt}"
-            resp_alt = requests.get(url_alt, timeout=25)
-            data_alt = resp_alt.json()
-            asin_list = data_alt.get("asinList", [])
+            url_flex = f"https://api.keepa.com/query?key={api_key}&domain=1&selection={json.dumps(selection_flex)}"
+            resp_flex = requests.get(url_flex, timeout=25)
+            asin_list = resp_flex.json().get("asinList", [])
 
         if not asin_list:
-            st.warning("Keepa no devolvió productos con estos parámetros. Intenta ampliar los rangos de BSR o ajustar los límites de precio.")
+            st.warning("Keepa no devolvió productos. Prueba ampliando el rango de precios o cambiando la categoría.")
             return pd.DataFrame()
 
-        # 3. Solicitud de detalles extendidos de productos (limitado a los primeros 30 ASINs)
+        # 2. Consultar datos detallados para los primeros 30 ASINs
         asins_str = ",".join(asin_list[:30])
         prod_url = f"https://api.keepa.com/product?key={api_key}&domain=1&asin={asins_str}&stats=90&offers=20"
         
@@ -150,52 +129,41 @@ def ejecutar_busqueda_inversa(
             brand = (prod.get("brand") or "Desconocida").strip()
             brand_norm = normalizar_texto(brand)
 
-            # A. Exclusión de Marcas Privadas de Amazon
+            # Excluir marcas privadas de Amazon
             if any(amz_brand in brand_norm for amz_brand in MARCAS_AMAZON_PRIVADAS):
                 continue
 
             stats = prod.get("stats", {})
 
-            # B. Métricas de Vendedores (FBA / FBM)
-            fba_count, fbm_count, total_sellers = extraer_conteo_vendedores(prod, stats)
-            
+            # Vendedores
+            fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
+            fbm_count = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_count))
+            total_sellers = fba_count + fbm_count
+
             if fba_count < min_sellers or fba_count > max_sellers:
                 continue
 
-            # C. Evaluación de la Buy Box
+            # Precio Buy Box o precio actual
             current_price = stats.get("buyBoxPriceMin", 0) or stats.get("current", [0]*10)[1] or 0
             buybox_price = current_price / 100.0 if current_price > 0 else min_precio
 
             current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
-            
-            # Buscar histórico de Buy Box si el nombre actual está vacío
-            if not current_seller_name and "buyBoxSellerIdHistory" in stats:
-                history = stats.get("buyBoxSellerIdHistory", [])
-                if history:
-                    current_seller_name = str(history[-1])
 
-            # D. Filtrado por Dominio del Fabricante / Marca Directa
+            # Exclusión de fabricante / Amazon
             if excluir_propia_marca:
                 seller_norm = normalizar_texto(current_seller_name)
-                
-                # Excluir si la Buy Box es del fabricante o de Amazon directamente
                 if es_dominada_por_fabricante(brand, current_seller_name):
                     continue
-                if "amazon" in seller_norm:
+                if "amazon" in seller_norm or "owala" in seller_norm:
                     continue
 
-            # E. Participación estimada de Amazon en la Buy Box (porcentaje)
-            buybox_amazon_share = stats.get("buyBoxAmazon30", 0) or stats.get("buyBoxAmazon90", 0) or 0
-            if buybox_amazon_share > max_amazon_share:
-                continue
-
-            # F. Métricas de ventas y BSR
+            # BSR y Ventas
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else max_bsr
             monthly_sold = prod.get("boughtInPastMonth", 0)
 
-            # G. Cálculos Financieros (Costo, Fees, Ganancia, ROI)
+            # Métricas Financieras
             costo_est = buybox_price * 0.50
-            fba_fee = buybox_price * 0.15 + 2.00  # Tarifa referencial de gestión logitudinal
+            fba_fee = buybox_price * 0.15 + 2.00
             ganancia = buybox_price - costo_est - fba_fee
             roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0
 
