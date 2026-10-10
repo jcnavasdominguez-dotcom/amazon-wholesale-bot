@@ -12,21 +12,15 @@ KEEPA_CATEGORIES = {
     "Juguetes": 1657930
 }
 
-# Marcas de Amazon y Marcas Directas/Fabricantes con Tienda Oficial / Control de Distribución
 MARCAS_EXCLUIDAS_DIRECTAS = [
-    # Marcas Propias de Amazon
     "amazon", "amazon basics", "amazonbasics", "amazon essentials", 
     "solimo", "pinzon", "presto!", "mama bear", "happy belly",
-    
-    # Grandes Fabricantes / Marcas con Tiendas Directas Dominantes (Gated / IP Risk)
     "ugg", "shark", "ninja", "keurig", "levoit", "bissell", "yankee candle",
-    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius",
-    "hatch baby", "beckham hotel collection", "cgk unlimited", "lane linen",
-    "niagara sleep solution", "mellanni", "pampers", "huggies", "euhomy"
+    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius"
 ]
 
 def normalizar_texto(texto: str) -> str:
-    """Limpia cadenas para comparaciones homogéneas."""
+    """Limpia y normaliza texto para comparaciones de marcas y vendedores."""
     if not texto:
         return ""
     texto = texto.lower()
@@ -35,25 +29,33 @@ def normalizar_texto(texto: str) -> str:
     tokens = [w for w in texto.split() if w not in palabras]
     return " ".join(tokens)
 
-def es_marca_excluida_o_fabricante(brand: str, seller_name: str) -> bool:
-    """Detecta si la marca del producto es una marca directa o el vendedor coincide con la marca."""
+def es_marca_o_fabricante_directo(brand: str, seller_name: str, offers: list) -> bool:
+    """Detecta si la marca es el propio vendedor en Buy Box o en las ofertas activas."""
     if not brand:
         return False
-    
+
     brand_norm = normalizar_texto(brand)
-    seller_norm = normalizar_texto(seller_name)
-    
-    # 1. Comprobar si la marca está en la lista de exclusión directa/fabricantes
+    if not brand_norm:
+        return False
+
+    # 1. Comprobar lista de marcas bloqueadas por defecto
     for marca_bloqueada in MARCAS_EXCLUIDAS_DIRECTAS:
         if marca_bloqueada in brand_norm or brand_norm in marca_bloqueada:
             return True
-            
-    # 2. Comprobar si el vendedor coincide con la marca (si existe vendedor activo)
-    if seller_norm and brand_norm:
+
+    # 2. Comprobar contra el vendedor actual de la Buy Box
+    seller_norm = normalizar_texto(seller_name)
+    if seller_norm:
         if brand_norm in seller_norm or seller_norm in brand_norm:
             return True
         coincidencias = set(brand_norm.split()).intersection(set(seller_norm.split()))
         if any(len(w) > 3 for w in coincidencias):
+            return True
+
+    # 3. Comprobar contra el listado de vendedores activos (offers)
+    for offer in offers:
+        s_name = normalizar_texto(offer.get("sellerName", ""))
+        if s_name and (brand_norm in s_name or s_name in brand_norm):
             return True
 
     return False
@@ -79,7 +81,7 @@ def ejecutar_busqueda_inversa(
 
     cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
 
-    # Estado de Tokens
+    # Verificación de tokens
     try:
         t_resp = requests.get(f"https://api.keepa.com/tokens?key={clean_key}", timeout=10).json()
         if "tokensLeft" in t_resp:
@@ -114,7 +116,7 @@ def ejecutar_busqueda_inversa(
         st.error("La API de Keepa no devolvió productos.")
         return pd.DataFrame()
 
-    # Consulta de detalles
+    # Consulta extendida con ofertas detalladas
     asins_str = ",".join(asin_list[:50])
     prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90&offers=20"
 
@@ -132,33 +134,43 @@ def ejecutar_busqueda_inversa(
             title = prod.get("title", "Sin Título")
             brand = (prod.get("brand") or "Desconocida").strip()
             stats = prod.get("stats", {})
-            current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
+            offers = prod.get("offers", [])
 
-            # FILTRO CLAVE: Excluir marcas de fabricante directo / tiendas oficiales
-            if excluir_propia_marca and es_marca_excluida_o_fabricante(brand, current_seller_name):
+            # 1. Contadores de Vendedores (FBA / FBM)
+            fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
+            fbm_count = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_count))
+            total_sellers = fba_count + fbm_count
+
+            # REGLA WHOLESALE: Excluir si tiene menos vendedores que el mínimo permitido (Filtra Private Label)
+            if total_sellers < min_sellers:
                 continue
 
-            # Precio
+            # 2. Vendedor Buy Box
+            current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
+
+            # REGLA WHOLESALE: Excluir marcas/fabricantes directos
+            if excluir_propia_marca and es_marca_o_fabricante_directo(brand, current_seller_name, offers):
+                continue
+
+            # 3. Precio
             buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
             if buybox_cents <= 0 and "current" in stats and len(stats["current"]) > 1:
                 buybox_cents = stats["current"][1] or 0
 
             buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
 
-            # Vendedores FBA / FBM
-            fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
-            fbm_count = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_count))
-            total_sellers = fba_count + fbm_count
-
-            # BSR
+            # 4. BSR y Ventas
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else 0
-
-            # Métricas Financieras
             monthly_sold = prod.get("boughtInPastMonth", 0)
+
+            # 5. Cálculos Financieros
             costo_est = buybox_price * 0.50
             fba_fee = buybox_price * 0.15 + 2.00
             ganancia = buybox_price - costo_est - fba_fee
             roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0
+
+            if roi < min_roi:
+                continue
 
             productos.append({
                 "ASIN": asin,
