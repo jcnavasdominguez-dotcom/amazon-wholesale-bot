@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 KEEPA_CATEGORIES = {
-    "Todas": 1055398,  # Hogar y Cocina por defecto para búsquedas globales
+    "Todas": 1055398,
     "Hogar y Cocina": 1055398,
     "Electrónica": 172282,
     "Oficina": 1064954,
@@ -59,26 +59,34 @@ def es_marca_o_fabricante_directo(brand: str, seller_name: str, offers_nuevas: l
 
     return False
 
-def obtener_asins_robustivo(clean_key: str, cat_id: int, min_precio: float, max_precio: float, modo: str, marca: str) -> list:
+def obtener_asins_filtrados_keepa(clean_key: str, cat_id: int, min_precio: float, max_precio: float, min_sellers: int) -> list:
+    """Solicita a la API de Keepa únicamente productos que cumplan con criterios Wholesale."""
     asin_list = []
+    
+    # Consulta a Product Finder /query filtrando por vendedores Nuevos y exclusión de Amazon
+    selection = {
+        "rootCategory": cat_id,
+        "current_NEW_gte": int(min_precio * 100),
+        "current_NEW_lte": int(max_precio * 100),
+        "offerCount_gte": int(min_sellers),
+        "buyBoxIsAmazon": False
+    }
 
-    # Intento 1: API /bestsellers de la categoría
     try:
-        bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
-        resp = requests.get(bs_url, timeout=15).json()
-        if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
-            asin_list = resp["bestSellersList"]["asinList"]
+        q_url = f"https://api.keepa.com/query?key={clean_key}&domain=1&selection={json.dumps(selection)}"
+        resp = requests.get(q_url, timeout=15).json()
+        if "asinList" in resp and resp["asinList"]:
+            asin_list = resp["asinList"]
     except Exception:
         pass
 
-    # Intento 2: API /search por término
+    # Fallback si el Product Finder estricto no retorna ASINs en esa subcategoría
     if not asin_list:
-        term = marca.strip() if (modo == "MARCA" and marca.strip()) else "home"
         try:
-            search_url = f"https://api.keepa.com/search?key={clean_key}&domain=1&type=product&term={term}"
-            resp = requests.get(search_url, timeout=15).json()
-            if "products" in resp:
-                asin_list = [p.get("asin") for p in resp["products"] if p.get("asin")]
+            bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
+            resp = requests.get(bs_url, timeout=15).json()
+            if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
+                asin_list = resp["bestSellersList"]["asinList"]
         except Exception:
             pass
 
@@ -105,7 +113,7 @@ def ejecutar_busqueda_inversa(
 
     cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
 
-    # Verificación de tokens de la API
+    # 1. Verificar tokens disponibles
     try:
         t_resp = requests.get(f"https://api.keepa.com/tokens?key={clean_key}", timeout=10).json()
         if "tokensLeft" in t_resp:
@@ -116,14 +124,15 @@ def ejecutar_busqueda_inversa(
     except Exception:
         pass
 
-    asin_list = obtener_asins_robustivo(clean_key, cat_id, min_precio, max_precio, modo, marca)
+    # 2. Obtener ASINs mediante filtrado estructural en Keepa
+    asin_list = obtener_asins_filtrados_keepa(clean_key, cat_id, min_precio, max_precio, min_sellers)
 
     if not asin_list:
-        st.error("La API de Keepa no devolvió productos para la consulta.")
+        st.warning("Keepa no encontró productos que cumplan con los rangos de precio y vendedores configurados.")
         return pd.DataFrame()
 
-    # Procesar muestra de hasta 100 ASINs
-    asins_str = ",".join(asin_list[:100])
+    # 3. Descargar datos extendidos para hasta 80 ASINs
+    asins_str = ",".join(asin_list[:80])
     prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90&offers=20"
 
     try:
@@ -142,7 +151,7 @@ def ejecutar_busqueda_inversa(
             stats = prod.get("stats", {})
             offers = prod.get("offers", [])
 
-            # 1. Contar ofertas en condición NUEVO
+            # Contar Ofertas en condición NUEVO
             offers_nuevas = []
             fba_nuevos = 0
             fbm_nuevos = 0
@@ -163,42 +172,34 @@ def ejecutar_busqueda_inversa(
                 fbm_nuevos = prod.get("fbmOfferCount", 0) or max(0, (stats.get("retrievedOfferCount", 0) - fba_nuevos))
                 total_nuevos = fba_nuevos + fbm_nuevos
 
-            # Excluir Private Label o listings sin competencia multivendedor de productos nuevos
+            # Excluir productos sin suficientes vendedores de artículos nuevos
             if total_nuevos < min_sellers:
                 continue
 
-            # 2. Vendedor de la Buy Box
+            # Vendedor de Buy Box
             current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
 
-            # Excluir fabricantes y marcas directas
+            # Excluir marcas directas/tiendas oficiales
             if excluir_propia_marca and es_marca_o_fabricante_directo(brand, current_seller_name, offers_nuevas):
                 continue
 
-            # 3. Validar precio
+            # Validar precio
             buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
             if buybox_cents <= 0 and "current" in stats and len(stats["current"]) > 1:
                 buybox_cents = stats["current"][1] or 0
 
             buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
 
-            if buybox_price < min_precio or buybox_price > max_precio:
-                continue
-
-            # 4. Ranking BSR
+            # BSR
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else 0
-            if max_bsr > 0 and bsr_90 > max_bsr:
-                continue
 
             monthly_sold = prod.get("boughtInPastMonth", 0)
 
-            # 5. Cálculos Financieros
+            # Cálculos Financieros
             costo_est = buybox_price * 0.50
             fba_fee = buybox_price * 0.15 + 2.00
             ganancia = buybox_price - costo_est - fba_fee
             roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0
-
-            if roi < min_roi:
-                continue
 
             productos.append({
                 "ASIN": asin,
