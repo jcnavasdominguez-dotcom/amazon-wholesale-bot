@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 KEEPA_CATEGORIES = {
-    "Todas": 1055398,  # Hogar y Cocina como categoría principal por defecto
+    "Todas": 1055398,
     "Electrónica": 172282,
     "Hogar y Cocina": 1055398,
     "Oficina": 1064954,
@@ -18,33 +18,51 @@ MARCAS_AMAZON_PRIVADAS = [
 ]
 
 def normalizar_texto(texto: str) -> str:
-    """Limpia cadenas para comparaciones homogéneas entre marcas y vendedores."""
     if not texto:
         return ""
     texto = texto.lower()
     texto = re.sub(r'[^a-z0-9\s]', '', texto)
-    palabras_irrelevantes = ["inc", "llc", "corp", "co", "ltd", "store", "official", "direct", "us", "usa"]
-    tokens = [w for w in texto.split() if w not in palabras_irrelevantes]
-    return " ".join(tokens)
+    palabras = ["inc", "llc", "corp", "co", "ltd", "store", "official", "direct", "us", "usa"]
+    return " ".join([w for w in texto.split() if w not in palabras])
 
 def es_dominada_por_fabricante(brand: str, seller_name: str) -> bool:
-    """Compara si la Buy Box pertenece al fabricante o dueño de la marca."""
     if not brand or not seller_name:
         return False
-    
-    brand_norm = normalizar_texto(brand)
-    seller_norm = normalizar_texto(seller_name)
-    
-    if not brand_norm or not seller_norm:
+    b_norm, s_norm = normalizar_texto(brand), normalizar_texto(seller_name)
+    if not b_norm or not s_norm:
         return False
-
-    if brand_norm in seller_norm or seller_norm in brand_norm:
+    if b_norm in s_norm or s_norm in b_norm:
         return True
-    
-    brand_tokens = set(brand_norm.split())
-    seller_tokens = set(seller_norm.split())
-    coincidencias = brand_tokens.intersection(seller_tokens)
-    return any(len(word) > 3 for word in coincidencias)
+    coincidencias = set(b_norm.split()).intersection(set(s_norm.split()))
+    return any(len(w) > 3 for w in coincidencias)
+
+def obtener_asins_keepa(clean_key: str, cat_id: int, modo: str, marca: str) -> list:
+    """Obtiene una lista garantizada de ASINs probando múltiples endpoints de Keepa."""
+    asin_list = []
+
+    # Intento 1: Consulta por Bestsellers de la Categoría
+    try:
+        bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
+        resp = requests.get(bs_url, timeout=15)
+        data = resp.json()
+        if "bestSellersList" in data and "asinList" in data["bestSellersList"]:
+            asin_list = data["bestSellersList"]["asinList"]
+    except Exception:
+        pass
+
+    # Intento 2: Si es por marca o falla la lista de Bestsellers, usamos la Búsqueda de Keepa
+    if not asin_list:
+        term = marca.strip() if (modo == "MARCA" and marca.strip()) else "best seller"
+        try:
+            search_url = f"https://api.keepa.com/search?key={clean_key}&domain=1&type=product&term={term}"
+            resp = requests.get(search_url, timeout=15)
+            data = resp.json()
+            if "products" in data:
+                asin_list = [p.get("asin") for p in data["products"] if p.get("asin")]
+        except Exception:
+            pass
+
+    return asin_list
 
 def ejecutar_busqueda_inversa(
     marca="",
@@ -67,48 +85,24 @@ def ejecutar_busqueda_inversa(
 
     cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
 
-    # 1. Petición primaria compatible con Keepa Query API
-    selection = {
-        "rootCategory": cat_id,
-        "current_NEW_gte": int(min_precio * 100),
-        "current_NEW_lte": int(max_precio * 100)
-    }
+    # 1. Obtener ASINs mediante estrategia multi-endpoint
+    asin_list = obtener_asins_keepa(clean_key, cat_id, modo, marca)
 
-    if modo == "MARCA" and marca.strip():
-        selection["title"] = marca.strip()
+    if not asin_list:
+        st.warning("No se pudieron recuperar ASINs de Keepa. Verifica los créditos de tu API Key.")
+        return pd.DataFrame()
 
-    url = f"https://api.keepa.com/query?key={clean_key}&domain=1&selection={json.dumps(selection)}"
+    # 2. Consultar datos y métricas detalladas para los ASINs obtenidos
+    asins_str = ",".join(asin_list[:40])
+    prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90&offers=20"
 
     try:
-        response = requests.get(url, timeout=25)
-        data = response.json()
-
-        if "error" in data:
-            st.error(f"Error Keepa API: {data['error'].get('message', 'Clave inválida o sin créditos')}")
-            return pd.DataFrame()
-
-        asin_list = data.get("asinList", [])
-
-        # Plan B de la API: Si no trae ASINs, consulta general por categoría sin rango de precio estricto
-        if not asin_list:
-            selection_b = {"rootCategory": cat_id}
-            if modo == "MARCA" and marca.strip():
-                selection_b["title"] = marca.strip()
-            
-            url_b = f"https://api.keepa.com/query?key={clean_key}&domain=1&selection={json.dumps(selection_b)}"
-            resp_b = requests.get(url_b, timeout=25)
-            asin_list = resp_b.json().get("asinList", [])
-
-        if not asin_list:
-            st.warning("Keepa no devolvió ASINs para esta búsqueda. Selecciona una categoría específica como 'Juguetes' o 'Electrónica'.")
-            return pd.DataFrame()
-
-        # 2. Consultar datos extendidos de los primeros 40 ASINs
-        asins_str = ",".join(asin_list[:40])
-        prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90&offers=20"
-        
         prod_resp = requests.get(prod_url, timeout=25)
         prod_data = prod_resp.json()
+
+        if "error" in prod_data:
+            st.error(f"Error Keepa API: {prod_data['error'].get('message', 'Clave inválida')}")
+            return pd.DataFrame()
 
         productos = []
         for prod in prod_data.get("products", []):
@@ -123,18 +117,12 @@ def ejecutar_busqueda_inversa(
 
             stats = prod.get("stats", {})
 
-            # Obtener Precio (Buy Box o Precio Nuevo actual como alternativa)
+            # Obtener Precio
             buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
             if buybox_cents <= 0 and "current" in stats and len(stats["current"]) > 1:
                 buybox_cents = stats["current"][1] or 0
 
-            buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else 0
-
-            # Validar rango de precio en Python (permitir margen amplio si el precio recuperado es válido)
-            if buybox_price > 0 and (buybox_price < (min_precio * 0.8) or buybox_price > (max_precio * 1.2)):
-                continue
-            if buybox_price <= 0:
-                buybox_price = min_precio  # Asignación referencial mínima si no hay precio directo
+            buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
 
             # Vendedores FBA y FBM
             fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
@@ -180,5 +168,5 @@ def ejecutar_busqueda_inversa(
         return pd.DataFrame(productos)
 
     except Exception as e:
-        st.error(f"Error de ejecución: {str(e)}")
+        st.error(f"Error de conexión: {str(e)}")
         return pd.DataFrame()
