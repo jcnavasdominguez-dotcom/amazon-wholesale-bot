@@ -7,7 +7,7 @@ st.set_page_config(page_title="Amazon Wholesale Finder", layout="wide")
 st.title("📦 Amazon Wholesale Finder")
 st.caption("Explorador inteligente de oportunidades globales con filtros avanzados para Reverse Sourcing")
 
-# --- BARRA LATERAL RESTAURADA COMPLETA ---
+# --- BARRA LATERAL COMPLETA ---
 with st.sidebar:
     st.header("⚙️ Filtros Wholesale")
     api_key = st.text_input("Keepa API Key", type="password")
@@ -22,6 +22,7 @@ with st.sidebar:
     min_sellers = st.number_input("Min. Vendedores FBA", min_value=1, max_value=50, value=2)
     max_sellers = st.number_input("Max. Vendedores FBA", min_value=1, max_value=50, value=20)
     max_bsr = st.number_input("Max. BSR 90d", min_value=1000, max_value=500000, value=150000)
+    max_amazon_share = st.slider("Max % Buy Box de Amazon", 0.0, 100.0, 40.0)
 
 # --- PESTAÑAS PRINCIPALES ---
 tab1, tab2 = st.tabs(["🌐 Buscador Global", "📑 Analizador de Catálogos"])
@@ -52,21 +53,26 @@ with tab1:
         if not api_key:
             st.error("Por favor ingresa tu Keepa API Key en el menú lateral.")
         else:
-            df_res = ejecutar_busqueda_inversa(
-                marca=marca,
-                categoria=categoria,
-                modo="MARCA" if modo == "Por Marca Específica" else "GLOBAL",
-                api_key=api_key,
-                min_roi=min_roi,
-                max_bsr=max_bsr,
-                min_precio=min_precio,
-                max_precio=max_precio,
-                min_sellers=min_sellers,
-                max_sellers=max_sellers,
-                excluir_propia_marca=excluir_propia_marca
-            )
-            if not df_res.empty:
-                st.dataframe(df_res, use_container_width=True)
+            with st.spinner("Escaneando mercado y aplicando filtros Wholesale..."):
+                df_res = ejecutar_busqueda_inversa(
+                    marca=marca,
+                    categoria=categoria,
+                    modo="MARCA" if modo == "Por Marca Específica" else "GLOBAL",
+                    api_key=api_key,
+                    min_roi=min_roi,
+                    max_bsr=max_bsr,
+                    min_precio=min_precio,
+                    max_precio=max_precio,
+                    min_sellers=min_sellers,
+                    max_sellers=max_sellers,
+                    max_amazon_share=max_amazon_share,
+                    excluir_propia_marca=excluir_propia_marca
+                )
+                if not df_res.empty:
+                    st.success(f"¡Se encontraron {len(df_res)} productos viables!")
+                    st.dataframe(df_res, use_container_width=True)
+                else:
+                    st.info("No se encontraron productos que superen los filtros de marca, competencia y rentabilidad en esta consulta.")
 
 with tab2:
     render_catalog_analyzer(
