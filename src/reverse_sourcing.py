@@ -16,9 +16,7 @@ MARCAS_EXCLUIDAS_DIRECTAS = [
     "amazon", "amazon basics", "amazonbasics", "amazon essentials", "solimo", "pinzon",
     "ugg", "shark", "ninja", "keurig", "levoit", "bissell", "yankee candle",
     "black+decker", "black & decker", "black decker", "dewalt", "stanley", "craftsman",
-    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius",
-    "utopia bedding", "zulay kitchen", "hy hao yun lai", "bedsure", "bare home",
-    "yafex", "hilife", "kitsch", "innqoo", "godonlif", "cgk unlimited", "lane linen"
+    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius"
 ]
 
 def normalizar_texto(texto: str) -> str:
@@ -30,7 +28,7 @@ def normalizar_texto(texto: str) -> str:
     tokens = [w for w in texto.split() if w not in palabras]
     return " ".join(tokens)
 
-def es_marca_bloqueada(brand: str, seller_name: str, offers_nuevas: list) -> bool:
+def es_marca_bloqueada(brand: str, seller_name: str) -> bool:
     if not brand:
         return False
     brand_norm = normalizar_texto(brand)
@@ -44,12 +42,6 @@ def es_marca_bloqueada(brand: str, seller_name: str, offers_nuevas: list) -> boo
     if seller_norm and brand_norm:
         if brand_norm in seller_norm or seller_norm in brand_norm:
             return True
-
-    for offer in offers_nuevas:
-        s_name = normalizar_texto(offer.get("sellerName", ""))
-        if s_name and (brand_norm in s_name or s_name in brand_norm):
-            if len(offers_nuevas) <= 1:
-                return True
 
     return False
 
@@ -75,42 +67,33 @@ def ejecutar_busqueda_inversa(
 
     cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
 
-    # Consulta a Product Finder /query exigiendo productos NUEVOS
-    selection = {
-        "rootCategory": cat_id,
-        "current_NEW_gte": int(min_precio * 100),
-        "current_NEW_lte": int(max_precio * 100),
-        "offerCount_gte": int(min_sellers),
-        "buyBoxIsAmazon": False
-    }
-
-    if modo == "MARCA" and marca.strip():
-        selection["title"] = marca.strip()
-
+    # Búsqueda por Bestsellers (Consumo: 1 Token)
     asin_list = []
     try:
-        q_url = f"https://api.keepa.com/query?key={clean_key}&domain=1&selection={json.dumps(selection)}"
-        resp = requests.get(q_url, timeout=15).json()
-        if "asinList" in resp and resp["asinList"]:
-            asin_list = resp["asinList"]
+        bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
+        resp = requests.get(bs_url, timeout=15).json()
+        if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
+            asin_list = resp["bestSellersList"]["asinList"]
     except Exception:
         pass
 
     if not asin_list:
+        term = marca.strip() if (modo == "MARCA" and marca.strip()) else "kitchen"
         try:
-            bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
-            resp = requests.get(bs_url, timeout=15).json()
-            if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
-                asin_list = resp["bestSellersList"]["asinList"]
+            search_url = f"https://api.keepa.com/search?key={clean_key}&domain=1&type=product&term={term}"
+            resp = requests.get(search_url, timeout=15).json()
+            if "products" in resp:
+                asin_list = [p.get("asin") for p in resp["products"] if p.get("asin")]
         except Exception:
             pass
 
     if not asin_list:
-        st.warning("Keepa no devolvió productos activos para los criterios seleccionados.")
+        st.error("No se pudieron recuperar productos desde Keepa.")
         return pd.DataFrame()
 
-    asins_str = ",".join(asin_list[:40])
-    prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90&offers=20"
+    # Procesar sólo 12 ASINs por consulta para respetar el límite de 21 tokens/min
+    asins_str = ",".join(asin_list[:12])
+    prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90"
 
     try:
         prod_resp = requests.get(prod_url, timeout=25).json()
@@ -128,49 +111,25 @@ def ejecutar_busqueda_inversa(
             title = prod.get("title", "Sin Título")
             brand = (prod.get("brand") or "Desconocida").strip()
             stats = prod.get("stats", {}) or {}
-            offers = prod.get("offers", []) or []
-
-            # Filtrar exclusivamente ofertas en condición NUEVO
-            offers_nuevas = []
-            fba_nuevos = 0
-            fbm_nuevos = 0
-
-            if offers:
-                for offer in offers:
-                    condition = offer.get("condition", -1)
-                    is_new = (condition == 0) or offer.get("isNew", False)
-                    if is_new:
-                        offers_nuevas.append(offer)
-                        if offer.get("isFBA", False):
-                            fba_nuevos += 1
-                        else:
-                            fbm_nuevos += 1
-                total_nuevos = fba_nuevos + fbm_nuevos
-            else:
-                total_nuevos = stats.get("retrievedOfferCount", 0)
-
-            # Excluir si no hay suficientes vendedores de unidades Nuevas o no hay disponibilidad
-            if total_nuevos < min_sellers or total_nuevos <= 0:
-                continue
 
             current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
 
-            if excluir_propia_marca and es_marca_bloqueada(brand, current_seller_name, offers_nuevas):
+            if excluir_propia_marca and es_marca_bloqueada(brand, current_seller_name):
+                continue
+
+            fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
+            fbm_count = prod.get("fbmOfferCount", 0) or 0
+            total_sellers = stats.get("retrievedOfferCount", 0) or (fba_count + fbm_count)
+
+            if total_sellers <= 0 or (min_sellers > 0 and total_sellers < min_sellers):
                 continue
 
             buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
             if buybox_cents <= 0 and "current" in stats and len(stats.get("current", [])) > 1:
                 buybox_cents = stats["current"][1] or 0
 
-            if buybox_cents <= 0:
-                continue
-
-            buybox_price = buybox_cents / 100.0
+            buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats.get("avg", [])) > 3 else 0
-            
-            if max_bsr > 0 and bsr_90 > max_bsr:
-                continue
-
             monthly_sold = prod.get("boughtInPastMonth", 0) or 0
 
             costo_est = buybox_price * (porcentaje_costo / 100.0)
@@ -178,14 +137,12 @@ def ejecutar_busqueda_inversa(
             ganancia = buybox_price - costo_est - fba_fee
             roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0.0
 
-            if min_roi > 0 and roi < min_roi:
-                continue
-
             productos.append({
                 "ASIN": asin,
                 "Producto": title[:40] + "...",
                 "Marca": brand,
-                "Total Vend. Nuevos": total_nuevos,
+                "Vend. FBA": fba_count,
+                "Total Vend.": total_sellers,
                 "Vendedor BuyBox": current_seller_name[:20] if current_seller_name else "Multivendedor",
                 "BSR 90d": bsr_90 if bsr_90 > 0 else "N/A",
                 "Ventas/Mes": monthly_sold,
