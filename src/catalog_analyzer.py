@@ -40,7 +40,7 @@ def es_marca_bloqueada(brand: str, seller_name: str) -> bool:
 
     return False
 
-def render_catalog_analyzer(api_key="", min_roi=20.0, min_sellers=2, max_bsr=150000, excluir_propia_marca=True):
+def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=2, max_bsr=150000, excluir_propia_marca=True, porcentaje_costo=50.0):
     st.subheader("📂 Cargar y Analizar Catálogo / Exportación de Keepa")
     st.markdown("Sube un archivo **CSV / Excel** exportado desde Keepa Product Finder o pega una lista de **ASINs** directamente.")
 
@@ -118,7 +118,7 @@ def render_catalog_analyzer(api_key="", min_roi=20.0, min_sellers=2, max_bsr=150
                 fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
                 total_sellers = stats.get("retrievedOfferCount", 0) or (fba_count + 1)
 
-                if total_sellers < min_sellers:
+                if min_sellers > 0 and total_sellers < min_sellers:
                     continue
 
                 buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
@@ -129,12 +129,13 @@ def render_catalog_analyzer(api_key="", min_roi=20.0, min_sellers=2, max_bsr=150
                 bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else 0
                 monthly_sold = prod.get("boughtInPastMonth", 0)
 
-                costo_est = buybox_price * 0.50
+                # Cálculo de rentabilidad con margen personalizable
+                costo_est = buybox_price * (porcentaje_costo / 100.0)
                 fba_fee = buybox_price * 0.15 + 2.00
                 ganancia = buybox_price - costo_est - fba_fee
-                roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0
+                roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0.0
 
-                if roi < min_roi:
+                if min_roi > 0 and roi < min_roi:
                     continue
 
                 productos.append({
@@ -154,10 +155,10 @@ def render_catalog_analyzer(api_key="", min_roi=20.0, min_sellers=2, max_bsr=150
 
             df_resultado = pd.DataFrame(productos)
             if not df_resultado.empty:
-                st.success(f"¡Se encontraron {len(df_resultado)} productos rentables!")
+                st.success(f"¡Se analizaron y mostraron {len(df_resultado)} productos del archivo!")
                 st.dataframe(df_resultado, use_container_width=True)
             else:
-                st.warning("Ningún producto de la lista superó los filtros de ROI, competencia o marca.")
+                st.warning("Ningún producto de la lista superó los criterios mínimos seleccionados.")
 
         except Exception as e:
             st.error(f"Error procesando la solicitud: {str(e)}")
