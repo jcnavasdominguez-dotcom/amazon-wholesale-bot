@@ -8,10 +8,7 @@ MARCAS_EXCLUIDAS_DIRECTAS = [
     "amazon", "amazon basics", "amazonbasics", "amazon essentials", "solimo", "pinzon",
     "ugg", "shark", "ninja", "keurig", "levoit", "bissell", "yankee candle",
     "black+decker", "black & decker", "black decker", "dewalt", "stanley", "craftsman",
-    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius",
-    "utopia bedding", "zulay kitchen", "hy hao yun lai", "bedsure", "bare home",
-    "hatch baby", "beckham hotel collection", "cgk unlimited", "lane linen",
-    "niagara sleep solution", "mellanni", "pampers", "huggies", "euhomy", "upsimples", "bedlore"
+    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius"
 ]
 
 def normalizar_texto(texto: str) -> str:
@@ -40,9 +37,9 @@ def es_marca_bloqueada(brand: str, seller_name: str) -> bool:
 
     return False
 
-def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=2, max_bsr=150000, excluir_propia_marca=True, porcentaje_costo=50.0):
+def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=1, max_bsr=150000, excluir_propia_marca=True, porcentaje_costo=50.0):
     st.subheader("📂 Cargar y Analizar Catálogo / Exportación de Keepa")
-    st.markdown("Sube un archivo **CSV / Excel** exportado desde Keepa Product Finder o pega una lista de **ASINs** directamente.")
+    st.markdown("Sube tu archivo **CSV / Excel** exportado desde Keepa Product Finder o pega una lista de **ASINs** directamente.")
 
     opcion_carga = st.radio("Método de entrada de datos:", ["Subir Archivo (CSV / Excel)", "Pegar lista de ASINs"], horizontal=True)
 
@@ -69,7 +66,7 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=2, max_bsr=1500
                     asins_para_procesar = df_input[col_asin].dropna().astype(str).tolist()
                     st.info(f"Se encontraron {len(asins_para_procesar)} ASINs en la columna `{col_asin}`.")
                 else:
-                    st.error("No se encontró una columna llamada 'ASIN' en el archivo.")
+                    st.error("No se encontró una columna que contenga la palabra 'ASIN' en el archivo.")
             except Exception as e:
                 st.error(f"Error al leer el archivo: {str(e)}")
 
@@ -92,7 +89,7 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=2, max_bsr=1500
         asins_unicos = list(dict.fromkeys(asins_para_procesar))[:100]
         asins_str = ",".join(asins_unicos)
 
-        st.info(f"Consultando métricas en Keepa para {len(asins_unicos)} productos...")
+        st.info(f"Consultando datos en Keepa para {len(asins_unicos)} productos...")
 
         prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90"
 
@@ -105,10 +102,13 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=2, max_bsr=1500
 
             productos = []
             for prod in prod_resp.get("products", []):
-                asin = prod.get("asin", "N/A")
+                if not prod or not prod.get("asin"):
+                    continue
+
+                asin = prod.get("asin")
                 title = prod.get("title", "Sin Título")
                 brand = (prod.get("brand") or "Desconocida").strip()
-                stats = prod.get("stats", {})
+                stats = prod.get("stats", {}) or {}
 
                 current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
 
@@ -118,25 +118,20 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=2, max_bsr=1500
                 fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
                 total_sellers = stats.get("retrievedOfferCount", 0) or (fba_count + 1)
 
-                if min_sellers > 0 and total_sellers < min_sellers:
-                    continue
-
+                # Obtener precio de venta activo o histórico
                 buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
-                if buybox_cents <= 0 and "current" in stats and len(stats["current"]) > 1:
+                if buybox_cents <= 0 and "current" in stats and len(stats.get("current", [])) > 1:
                     buybox_cents = stats["current"][1] or 0
 
-                buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else 0.0
-                bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else 0
-                monthly_sold = prod.get("boughtInPastMonth", 0)
+                buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else 19.99
+                bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats.get("avg", [])) > 3 else 0
+                monthly_sold = prod.get("boughtInPastMonth", 0) or 0
 
-                # Cálculo de rentabilidad con margen personalizable
+                # Cálculo de ROI
                 costo_est = buybox_price * (porcentaje_costo / 100.0)
                 fba_fee = buybox_price * 0.15 + 2.00
                 ganancia = buybox_price - costo_est - fba_fee
                 roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0.0
-
-                if min_roi > 0 and roi < min_roi:
-                    continue
 
                 productos.append({
                     "ASIN": asin,
@@ -155,10 +150,10 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=2, max_bsr=1500
 
             df_resultado = pd.DataFrame(productos)
             if not df_resultado.empty:
-                st.success(f"¡Se analizaron y mostraron {len(df_resultado)} productos del archivo!")
+                st.success(f"¡Se procesaron exitosamente {len(df_resultado)} productos!")
                 st.dataframe(df_resultado, use_container_width=True)
             else:
-                st.warning("Ningún producto de la lista superó los criterios mínimos seleccionados.")
+                st.warning("No se pudieron extraer métricas para la lista de ASINs proporcionable.")
 
         except Exception as e:
             st.error(f"Error procesando la solicitud: {str(e)}")
