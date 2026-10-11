@@ -8,7 +8,10 @@ MARCAS_EXCLUIDAS_DIRECTAS = [
     "amazon", "amazon basics", "amazonbasics", "amazon essentials", "solimo", "pinzon",
     "ugg", "shark", "ninja", "keurig", "levoit", "bissell", "yankee candle",
     "black+decker", "black & decker", "black decker", "dewalt", "stanley", "craftsman",
-    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius"
+    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius",
+    "utopia bedding", "zulay kitchen", "hy hao yun lai", "bedsure", "bare home",
+    "yafex", "hilife", "kitsch", "innqoo", "godonlif", "cgk unlimited", "lane linen",
+    "giuseppe zanotti", "gucci", "louis vuitton"
 ]
 
 def normalizar_texto(texto: str) -> str:
@@ -20,24 +23,33 @@ def normalizar_texto(texto: str) -> str:
     tokens = [w for w in texto.split() if w not in palabras]
     return " ".join(tokens)
 
-def es_marca_bloqueada(brand: str, seller_name: str) -> bool:
+def es_marca_bloqueada(brand: str, seller_name: str, offers_nuevas: list) -> bool:
     if not brand:
         return False
     brand_norm = normalizar_texto(brand)
     seller_norm = normalizar_texto(seller_name)
 
+    # 1. Bloqueo por lista extendida de marcas directas / Private Label
     for marca_b in MARCAS_EXCLUIDAS_DIRECTAS:
         m_norm = normalizar_texto(marca_b)
         if m_norm and (m_norm in brand_norm or brand_norm in m_norm):
             return True
 
+    # 2. Bloqueo si el vendedor en la Buy Box es la propia marca
     if seller_norm and brand_norm:
         if brand_norm in seller_norm or seller_norm in brand_norm:
             return True
 
+    # 3. Bloqueo si la marca es el único vendedor activo de unidades Nuevas
+    for offer in offers_nuevas:
+        s_name = normalizar_texto(offer.get("sellerName", ""))
+        if s_name and (brand_norm in s_name or s_name in brand_norm):
+            if len(offers_nuevas) <= 1:
+                return True
+
     return False
 
-def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=1, max_bsr=150000, excluir_propia_marca=True, porcentaje_costo=50.0):
+def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=2, max_bsr=150000, excluir_propia_marca=True, porcentaje_costo=50.0):
     st.subheader("📂 Cargar y Analizar Catálogo / Exportación de Keepa")
     st.markdown("Sube tu archivo **CSV / Excel** exportado desde Keepa Product Finder o pega una lista de **ASINs** directamente.")
 
@@ -66,7 +78,7 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=1, max_bsr=1500
                     asins_para_procesar = df_input[col_asin].dropna().astype(str).tolist()
                     st.info(f"Se encontraron {len(asins_para_procesar)} ASINs en la columna `{col_asin}`.")
                 else:
-                    st.error("No se encontró una columna que contenga la palabra 'ASIN' en el archivo.")
+                    st.error("No se encontró una columna de ASINs en el archivo.")
             except Exception as e:
                 st.error(f"Error al leer el archivo: {str(e)}")
 
@@ -89,9 +101,10 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=1, max_bsr=1500
         asins_unicos = list(dict.fromkeys(asins_para_procesar))[:100]
         asins_str = ",".join(asins_unicos)
 
-        st.info(f"Consultando datos en Keepa para {len(asins_unicos)} productos...")
+        st.info(f"Consultando métricas en Keepa para {len(asins_unicos)} productos...")
 
-        prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90"
+        # Requerir ofertas explicitamente para verificar condicion Nuevo vs Usado
+        prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90&offers=20"
 
         try:
             prod_resp = requests.get(prod_url, timeout=30).json()
@@ -109,35 +122,68 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=1, max_bsr=1500
                 title = prod.get("title", "Sin Título")
                 brand = (prod.get("brand") or "Desconocida").strip()
                 stats = prod.get("stats", {}) or {}
+                offers = prod.get("offers", []) or []
 
-                current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
+                # 1. FILTRO ESTRUCTURAL: Verificar únicamente vendedores en estado NUEVO
+                offers_nuevas = []
+                fba_nuevos = 0
+                fbm_nuevos = 0
 
-                if excluir_propia_marca and es_marca_bloqueada(brand, current_seller_name):
+                if offers:
+                    for offer in offers:
+                        condition = offer.get("condition", -1)
+                        is_new = (condition == 0) or offer.get("isNew", False)
+                        if is_new:
+                            offers_nuevas.append(offer)
+                            if offer.get("isFBA", False):
+                                fba_nuevos += 1
+                            else:
+                                fbm_nuevos += 1
+                    total_nuevos = fba_nuevos + fbm_nuevos
+                else:
+                    fba_nuevos = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
+                    total_nuevos = stats.get("retrievedOfferCount", 0)
+
+                # Descartar productos sin stock (total_nuevos <= 0 o -2) o Private Label (< min_sellers nuevos)
+                if total_nuevos < min_sellers or total_nuevos <= 0:
                     continue
 
-                fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
-                total_sellers = stats.get("retrievedOfferCount", 0) or (fba_count + 1)
+                # 2. Vendedor Buy Box
+                current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
 
-                # Obtener precio de venta activo o histórico
+                # 3. Excluir marcas directas / tiendas oficiales
+                if excluir_propia_marca and es_marca_bloqueada(brand, current_seller_name, offers_nuevas):
+                    continue
+
+                # 4. Validar disponibilidad y BSR
+                bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats.get("avg", [])) > 3 else 0
+                if max_bsr > 0 and bsr_90 > max_bsr:
+                    continue
+
                 buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
                 if buybox_cents <= 0 and "current" in stats and len(stats.get("current", [])) > 1:
                     buybox_cents = stats["current"][1] or 0
 
-                buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else 19.99
-                bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats.get("avg", [])) > 3 else 0
+                if buybox_cents <= 0:
+                    continue  # Descartar si no hay precio activo en Amazon
+
+                buybox_price = buybox_cents / 100.0
                 monthly_sold = prod.get("boughtInPastMonth", 0) or 0
 
-                # Cálculo de ROI
+                # 5. Cálculos Financieros
                 costo_est = buybox_price * (porcentaje_costo / 100.0)
                 fba_fee = buybox_price * 0.15 + 2.00
                 ganancia = buybox_price - costo_est - fba_fee
                 roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0.0
 
+                if min_roi > 0 and roi < min_roi:
+                    continue
+
                 productos.append({
                     "ASIN": asin,
                     "Producto": title[:40] + "...",
                     "Marca": brand,
-                    "Total Vend.": total_sellers,
+                    "Total Vend. Nuevos": total_nuevos,
                     "Vendedor BuyBox": current_seller_name[:20] if current_seller_name else "Multivendedor",
                     "BSR 90d": bsr_90 if bsr_90 > 0 else "N/A",
                     "Ventas/Mes": monthly_sold,
@@ -150,10 +196,10 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=1, max_bsr=1500
 
             df_resultado = pd.DataFrame(productos)
             if not df_resultado.empty:
-                st.success(f"¡Se procesaron exitosamente {len(df_resultado)} productos!")
+                st.success(f"¡Se filtraron exitosamente {len(df_resultado)} productos Wholesale disponibles!")
                 st.dataframe(df_resultado, use_container_width=True)
             else:
-                st.warning("No se pudieron extraer métricas para la lista de ASINs proporcionable.")
+                st.warning("Ningún producto de la lista cumple con tener competencia multivendedor de productos NUEVOS activa en Amazon.")
 
         except Exception as e:
             st.error(f"Error procesando la solicitud: {str(e)}")
