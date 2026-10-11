@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 KEEPA_CATEGORIES = {
-    "Todas": 1055398,  # Hogar y Cocina por defecto
+    "Todas": 1055398,
     "Hogar y Cocina": 1055398,
     "Electrónica": 172282,
     "Oficina": 1064954,
@@ -16,10 +16,7 @@ MARCAS_EXCLUIDAS_DIRECTAS = [
     "amazon", "amazon basics", "amazonbasics", "amazon essentials", "solimo", "pinzon",
     "ugg", "shark", "ninja", "keurig", "levoit", "bissell", "yankee candle",
     "black+decker", "black & decker", "black decker", "dewalt", "stanley", "craftsman",
-    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius",
-    "utopia bedding", "zulay kitchen", "hy hao yun lai", "bedsure", "bare home",
-    "hatch baby", "beckham hotel collection", "cgk unlimited", "lane linen",
-    "niagara sleep solution", "mellanni", "pampers", "huggies", "euhomy", "upsimples", "bedlore"
+    "apple", "dyson", "sony", "samsung", "bose", "lego", "owala", "celsius"
 ]
 
 def normalizar_texto(texto: str) -> str:
@@ -34,17 +31,14 @@ def normalizar_texto(texto: str) -> str:
 def es_marca_bloqueada(brand: str, seller_name: str) -> bool:
     if not brand:
         return False
-
     brand_norm = normalizar_texto(brand)
     seller_norm = normalizar_texto(seller_name)
 
-    # Bloqueo por lista negra
     for marca_b in MARCAS_EXCLUIDAS_DIRECTAS:
         m_norm = normalizar_texto(marca_b)
         if m_norm and (m_norm in brand_norm or brand_norm in m_norm):
             return True
 
-    # Coincidencia directa entre Marca y Vendedor Buy Box (Fabricante directo)
     if seller_norm and brand_norm:
         if brand_norm in seller_norm or seller_norm in brand_norm:
             return True
@@ -56,14 +50,15 @@ def ejecutar_busqueda_inversa(
     categoria="Todas",
     modo="GLOBAL",
     api_key="",
-    min_roi=20.0,
+    min_roi=0.0,
     max_bsr=150000,
     min_precio=15.0,
     max_precio=250.0,
     min_sellers=2,
     max_sellers=20,
     max_amazon_share=40.0,
-    excluir_propia_marca=True
+    excluir_propia_marca=True,
+    porcentaje_costo=50.0
 ):
     clean_key = str(api_key).strip()
     if not clean_key:
@@ -72,78 +67,71 @@ def ejecutar_busqueda_inversa(
 
     cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
 
-    # 1. Verificar tokens antes de ejecutar
+    # 1. Recuperación amplia de Bestsellers para escaneo global
+    asin_list = []
     try:
-        t_resp = requests.get(f"https://api.keepa.com/tokens?key={clean_key}", timeout=10).json()
-        if "tokensLeft" in t_resp:
-            st.info(f"🔑 Tokens disponibles antes de la consulta: {t_resp['tokensLeft']}")
-            if t_resp["tokensLeft"] < 10:
-                st.error("Tokens insuficientes (<10). Espera unos minutos para recargar.")
-                return pd.DataFrame()
+        bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
+        resp = requests.get(bs_url, timeout=15).json()
+        if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
+            asin_list = resp["bestSellersList"]["asinList"]
     except Exception:
         pass
 
-    # 2. QUERY OPTIMIZADA: Filtra productos directamente en los servidores de Keepa
-    selection = {
-        "rootCategory": cat_id,
-        "current_NEW_gte": int(min_precio * 100),
-        "current_NEW_lte": int(max_precio * 100),
-        "offerCount_gte": int(min_sellers),
-        "buyBoxIsAmazon": False
-    }
+    if not asin_list:
+        term = marca.strip() if (modo == "MARCA" and marca.strip()) else "kitchen"
+        try:
+            search_url = f"https://api.keepa.com/search?key={clean_key}&domain=1&type=product&term={term}"
+            resp = requests.get(search_url, timeout=15).json()
+            if "products" in resp:
+                asin_list = [p.get("asin") for p in resp["products"] if p.get("asin")]
+        except Exception:
+            pass
 
-    if modo == "MARCA" and marca.strip():
-        selection["title"] = marca.strip()
+    if not asin_list:
+        st.error("No se pudieron recuperar productos desde la API de Keepa.")
+        return pd.DataFrame()
+
+    # 2. Descargar detalles completos de los primeros 40 productos
+    asins_str = ",".join(asin_list[:40])
+    prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90"
 
     try:
-        q_url = f"https://api.keepa.com/query?key={clean_key}&domain=1&selection={json.dumps(selection)}"
-        q_resp = requests.get(q_url, timeout=20).json()
-        asin_list = q_resp.get("asinList", [])
-
-        if not asin_list:
-            st.warning("Keepa no encontró productos con estos filtros exactos. Prueba ampliar el rango de precios.")
-            return pd.DataFrame()
-
-        # 3. Descargar únicamente los primeros 25 productos pre-filtrados (Ahorro máximo de tokens)
-        asins_str = ",".join(asin_list[:25])
-        prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90"
-        
         prod_resp = requests.get(prod_url, timeout=25).json()
+
+        if "error" in prod_resp:
+            st.error(f"Error Keepa API: {prod_resp['error'].get('message', 'Clave inválida')}")
+            return pd.DataFrame()
 
         productos = []
         for prod in prod_resp.get("products", []):
-            asin = prod.get("asin", "N/A")
+            if not prod or not prod.get("asin"):
+                continue
+
+            asin = prod.get("asin")
             title = prod.get("title", "Sin Título")
             brand = (prod.get("brand") or "Desconocida").strip()
-            stats = prod.get("stats", {})
+            stats = prod.get("stats", {}) or {}
 
-            # Obtener vendedor Buy Box
             current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
 
-            # Excluir marcas directas/fabricantes
             if excluir_propia_marca and es_marca_bloqueada(brand, current_seller_name):
                 continue
 
-            # Precio de la Buy Box o precio Nuevo
-            buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
-            if buybox_cents <= 0 and "current" in stats and len(stats["current"]) > 1:
-                buybox_cents = stats["current"][1] or 0
-
-            buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
-
-            # BSR
-            bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else 0
-            monthly_sold = prod.get("boughtInPastMonth", 0)
-
-            # Conteo de vendedores
             fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
             total_sellers = stats.get("retrievedOfferCount", 0) or (fba_count + 1)
 
-            # Cálculos Financieros
-            costo_est = buybox_price * 0.50
+            buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
+            if buybox_cents <= 0 and "current" in stats and len(stats.get("current", [])) > 1:
+                buybox_cents = stats["current"][1] or 0
+
+            buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
+            bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats.get("avg", [])) > 3 else 0
+            monthly_sold = prod.get("boughtInPastMonth", 0) or 0
+
+            costo_est = buybox_price * (porcentaje_costo / 100.0)
             fba_fee = buybox_price * 0.15 + 2.00
             ganancia = buybox_price - costo_est - fba_fee
-            roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0
+            roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0.0
 
             productos.append({
                 "ASIN": asin,
@@ -163,5 +151,5 @@ def ejecutar_busqueda_inversa(
         return pd.DataFrame(productos)
 
     except Exception as e:
-        st.error(f"Error en la consulta: {str(e)}")
+        st.error(f"Error procesando búsqueda: {str(e)}")
         return pd.DataFrame()
