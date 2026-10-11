@@ -59,7 +59,6 @@ def render_catalog_analyzer(api_key="", min_roi=20.0, min_sellers=2, max_bsr=150
 
                 st.success(f"Archivo cargado exitosamente. Filas detectadas: {len(df_input)}")
 
-                # Buscar columna que contenga ASINs
                 col_asin = None
                 for col in df_input.columns:
                     if "asin" in col.lower():
@@ -90,7 +89,7 @@ def render_catalog_analyzer(api_key="", min_roi=20.0, min_sellers=2, max_bsr=150
             st.warning("Por favor carga un archivo o pega al menos un ASIN válido.")
             return
 
-        asins_unicos = list(dict.fromkeys(asins_para_procesar))[:100]  # Procesar hasta 100 ASINs
+        asins_unicos = list(dict.fromkeys(asins_para_procesar))[:100]
         asins_str = ",".join(asins_unicos)
 
         st.info(f"Consultando métricas en Keepa para {len(asins_unicos)} productos...")
@@ -111,21 +110,17 @@ def render_catalog_analyzer(api_key="", min_roi=20.0, min_sellers=2, max_bsr=150
                 brand = (prod.get("brand") or "Desconocida").strip()
                 stats = prod.get("stats", {})
 
-                # Vendedor Buy Box
                 current_seller_name = stats.get("buyBoxCurrentSellerName", "") or ""
 
-                # Filtro de Marcas Directas
                 if excluir_propia_marca and es_marca_bloqueada(brand, current_seller_name):
                     continue
 
-                # Vendedores totales
                 fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
                 total_sellers = stats.get("retrievedOfferCount", 0) or (fba_count + 1)
 
                 if total_sellers < min_sellers:
                     continue
 
-                # Precio y BSR
                 buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
                 if buybox_cents <= 0 and "current" in stats and len(stats["current"]) > 1:
                     buybox_cents = stats["current"][1] or 0
@@ -134,7 +129,6 @@ def render_catalog_analyzer(api_key="", min_roi=20.0, min_sellers=2, max_bsr=150
                 bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats["avg"]) > 3 else 0
                 monthly_sold = prod.get("boughtInPastMonth", 0)
 
-                # Financiero
                 costo_est = buybox_price * 0.50
                 fba_fee = buybox_price * 0.15 + 2.00
                 ganancia = buybox_price - costo_est - fba_fee
