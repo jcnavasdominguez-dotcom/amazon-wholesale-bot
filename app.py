@@ -7,7 +7,7 @@ st.set_page_config(page_title="Amazon Wholesale Finder", layout="wide")
 st.title("📦 Amazon Wholesale Finder")
 st.caption("Explorador inteligente de oportunidades globales con filtros avanzados para Reverse Sourcing")
 
-# --- BARRA LATERAL COMPLETA ---
+# --- BARRA LATERAL RESTAURADA COMPLETA ---
 with st.sidebar:
     st.header("⚙️ Filtros Wholesale")
     api_key = st.text_input("Keepa API Key", type="password")
@@ -16,7 +16,8 @@ with st.sidebar:
     excluir_propia_marca = st.checkbox("Excluir si vende el Fabricante", value=True)
     
     st.subheader("📊 Criterios Financieros")
-    min_roi = st.slider("ROI Mínimo deseado (%)", 0.0, 100.0, 20.0)
+    porcentaje_costo = st.slider("Costo Est. de Compra (% del P. Venta)", 10.0, 90.0, 50.0)
+    min_roi = st.slider("ROI Mínimo deseado (%)", 0.0, 100.0, 0.0)
     
     st.subheader("👥 Competencia y Dominio")
     min_sellers = st.number_input("Min. Vendedores FBA", min_value=1, max_value=50, value=2)
@@ -80,5 +81,6 @@ with tab2:
         min_roi=min_roi,
         min_sellers=min_sellers,
         max_bsr=max_bsr,
-        excluir_propia_marca=excluir_propia_marca
+        excluir_propia_marca=excluir_propia_marca,
+        porcentaje_costo=porcentaje_costo
     )
