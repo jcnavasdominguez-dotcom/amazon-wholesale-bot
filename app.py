@@ -7,54 +7,54 @@ st.set_page_config(page_title="Amazon Wholesale Finder", layout="wide")
 st.title("📦 Amazon Wholesale Finder")
 st.caption("Explorador inteligente de oportunidades globales y análisis de catálogos para Reverse Sourcing")
 
-# --- BARRA LATERAL CON TOOLTIPS Y EXPLICACIONES DETALLADAS ---
+# --- BARRA LATERAL CON CAMPOS DE TEXTO NUMÉRICOS PARA MAYOR PRECISIÓN ---
 with st.sidebar:
     st.header("⚙️ Filtros Wholesale")
     api_key = st.text_input(
         "Keepa API Key", 
         type="password",
-        help="Clave de API otorgada por Keepa. Requerida para realizar consultas de productos y traer métricas en tiempo real."
+        help="Clave de API otorgada por Keepa para realizar consultas de productos[cite: 30, 31]."
     )
     
     st.subheader("🛡️ Exclusión de Dominio")
     excluir_propia_marca = st.checkbox(
         "Excluir si vende el Fabricante", 
         value=True,
-        help="Si está activo, descarta productos donde la propia marca comercial sea el único vendedor de la Buy Box o posea la tienda oficial, evitando riesgos de IP / Private Label."
+        help="Descarta productos donde la propia marca comercial sea el único vendedor de la Buy Box o posea la tienda oficial[cite: 27]."
     )
     
     st.subheader("📊 Criterios Financieros")
-    porcentaje_costo = st.slider(
+    porcentaje_costo = st.number_input(
         "Costo Est. de Compra (% del P. Venta)", 
-        10.0, 90.0, 50.0,
-        help="Estimación de a qué porcentaje del precio de venta te venderá el mayorista el producto. El estándar Wholesale es entre 40% y 50% del MSRP."
+        min_value=1.0, max_value=99.0, value=50.0, step=0.5,
+        help="Estimación de costo del producto en relación al precio de venta en Amazon (el estándar Wholesale es entre 40% y 50%)[cite: 27]."
     )
-    min_roi = st.slider(
+    min_roi = st.number_input(
         "ROI Mínimo deseado (%)", 
-        0.0, 100.0, 0.0,
-        help="Retorno sobre la Inversión mínimo aceptable. Déjalo en 0.0% durante la prospección inicial para ver todos los productos viables."
+        min_value=0.0, max_value=500.0, value=0.0, step=0.5,
+        help="Retorno sobre la Inversión mínimo aceptable[cite: 27]. Déjalo en 0.0% para ver todas las oportunidades viables[cite: 27]."
     )
     
     st.subheader("👥 Competencia y Dominio")
     min_sellers = st.number_input(
         "Min. Vendedores FBA", 
-        min_value=1, max_value=50, value=2,
-        help="Cantidad mínima de vendedores compitiendo en el listing. Un valor ≥ 2 asegura que el producto es Wholesale y no Private Label."
+        min_value=1, max_value=50, value=2, step=1,
+        help="Cantidad mínima de vendedores en el listing (≥ 2 asegura producto Wholesale)[cite: 27]."
     )
     max_sellers = st.number_input(
         "Max. Vendedores FBA", 
-        min_value=1, max_value=50, value=20,
-        help="Cantidad máxima de vendedores. Evita listings saturados (guerra de precios y poco volumen por vendedor)."
+        min_value=1, max_value=100, value=20, step=1,
+        help="Cantidad máxima de vendedores. Evita listings saturados."
     )
     max_bsr = st.number_input(
         "Max. BSR 90d", 
-        min_value=1000, max_value=500000, value=150000,
-        help="Best Sellers Rank promedio de los últimos 90 días. A menor número, mayores ventas. Un BSR < 100,000 suele indicar rotación rápida."
+        min_value=1000, max_value=5000000, value=150000, step=5000,
+        help="Best Sellers Rank promedio de los últimos 90 días[cite: 27, 28]. A menor número, mayor velocidad de venta[cite: 27, 28]."
     )
-    max_amazon_share = st.slider(
+    max_amazon_share = st.number_input(
         "Max % Buy Box de Amazon", 
-        0.0, 100.0, 40.0,
-        help="Porcentaje del tiempo que Amazon domina la caja de compra. Si Amazon tiene > 50% de la Buy Box, es muy difícil competir contra ellos."
+        min_value=0.0, max_value=100.0, value=40.0, step=1.0,
+        help="Porcentaje del tiempo que Amazon domina la caja de compra. Si es > 50%, es difícil competir."
     )
 
 # --- PESTAÑAS PRINCIPALES ---
@@ -78,9 +78,9 @@ with tab1:
 
     col1, col2 = st.columns(2)
     with col1:
-        min_precio = st.number_input("Precio Venta Mínimo ($)", value=15.0)
+        min_precio = st.number_input("Precio Venta Mínimo ($)", value=15.0, step=1.0)
     with col2:
-        max_precio = st.number_input("Precio Venta Máximo ($)", value=250.0)
+        max_precio = st.number_input("Precio Venta Máximo ($)", value=250.0, step=1.0)
 
     if st.button("🔍 Escanear Oportunidades"):
         if not api_key:
@@ -106,7 +106,7 @@ with tab1:
                     st.success(f"¡Se encontraron {len(df_res)} productos viables!")
                     st.dataframe(df_res, use_container_width=True)
                 else:
-                    st.warning("No se obtuvieron resultados. Verifica el saldo de tokens de tu API Key o amplia el rango de precio.")
+                    st.warning("No se obtuvieron resultados para los criterios seleccionados. Intenta ampliar el rango de precio[cite: 30].")
 
 with tab2:
     render_catalog_analyzer(
