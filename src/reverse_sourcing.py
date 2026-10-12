@@ -45,6 +45,27 @@ def es_marca_bloqueada(brand: str, seller_name: str) -> bool:
 
     return False
 
+def estimar_ventas_por_bsr(bsr: int) -> int:
+    """Calcula una estimación aproximada de ventas mensuales según el BSR."""
+    if bsr <= 0:
+        return 0
+    if bsr <= 100:
+        return 3000
+    elif bsr <= 500:
+        return 1500
+    elif bsr <= 1000:
+        return 800
+    elif bsr <= 5000:
+        return 350
+    elif bsr <= 10000:
+        return 180
+    elif bsr <= 50000:
+        return 60
+    elif bsr <= 100000:
+        return 20
+    else:
+        return 5
+
 def ejecutar_busqueda_inversa(
     marca="",
     categoria="Todas",
@@ -62,14 +83,14 @@ def ejecutar_busqueda_inversa(
 ):
     clean_key = str(api_key).strip()
     if not clean_key:
-        st.error("No se proporcionó una Keepa API Key válida[cite: 30].")
+        st.error("No se proporcionó una Keepa API Key válida.")
         return pd.DataFrame()
 
     cat_id = KEEPA_CATEGORIES.get(categoria)
 
     asin_list = []
 
-    # 1. Búsqueda por Bestsellers si se selecciona una categoría específica
+    # 1. Búsqueda Bestsellers si hay categoría seleccionada
     if cat_id:
         try:
             bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
@@ -79,7 +100,7 @@ def ejecutar_busqueda_inversa(
         except Exception:
             pass
 
-    # 2. Búsqueda por término neutro si es Búsqueda Global ("Todas") o por Marca
+    # 2. Búsqueda por término neutro en Búsqueda Global
     if not asin_list:
         term = marca.strip() if (modo == "MARCA" and marca.strip()) else "kitchen"
         try:
@@ -94,8 +115,8 @@ def ejecutar_busqueda_inversa(
         st.error("No se pudieron recuperar productos desde Keepa.")
         return pd.DataFrame()
 
-    # Procesar únicamente 10 ASINs por consulta para respetar la tasa de 21 tokens/minuto[cite: 31]
-    asins_str = ",".join(asin_list[:10])
+    # Procesar un lote de 20 ASINs por consulta (Consumo optimizado: 1-2 tokens)
+    asins_str = ",".join(asin_list[:20])
     prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90"
 
     try:
@@ -120,9 +141,13 @@ def ejecutar_busqueda_inversa(
             if excluir_propia_marca and es_marca_bloqueada(brand, current_seller_name):
                 continue
 
+            # Extracción limpia de vendedores
             fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
             fbm_count = prod.get("fbmOfferCount", 0) or 0
-            total_sellers = stats.get("retrievedOfferCount", 0) or (fba_count + fbm_count)
+            raw_sellers = stats.get("retrievedOfferCount", 0)
+
+            # Limpiar valor numérico negativo (-2) de Keepa
+            total_sellers = raw_sellers if raw_sellers > 0 else (fba_count + fbm_count if (fba_count + fbm_count) > 0 else 1)
 
             buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
             if buybox_cents <= 0 and "current" in stats and len(stats.get("current", [])) > 1:
@@ -130,12 +155,15 @@ def ejecutar_busqueda_inversa(
 
             buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
             
-            # Filtro por rango de precio
             if buybox_price < min_precio or buybox_price > max_precio:
                 continue
 
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats.get("avg", [])) > 3 else 0
+            
+            # Estimación inteligente de ventas si Keepa no trae la insignia
             monthly_sold = prod.get("boughtInPastMonth", 0) or 0
+            if monthly_sold == 0 and bsr_90 > 0:
+                monthly_sold = estimar_ventas_por_bsr(bsr_90)
 
             costo_est = buybox_price * (porcentaje_costo / 100.0)
             fba_fee = buybox_price * 0.15 + 2.00
@@ -150,7 +178,7 @@ def ejecutar_busqueda_inversa(
                 "Total Vend.": total_sellers,
                 "Vendedor BuyBox": current_seller_name[:20] if current_seller_name else "Multivendedor",
                 "BSR 90d": bsr_90 if bsr_90 > 0 else "N/A",
-                "Ventas/Mes": monthly_sold,
+                "Ventas/Mes Est.": monthly_sold,
                 "P. Venta ($)": round(buybox_price, 2),
                 "Costo Est. ($)": round(costo_est, 2),
                 "Ganancia ($)": round(ganancia, 2),
