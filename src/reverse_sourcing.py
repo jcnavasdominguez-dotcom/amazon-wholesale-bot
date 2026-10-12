@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 KEEPA_CATEGORIES = {
-    "Todas": 1055398,
+    "Todas": None,
     "Hogar y Cocina": 1055398,
     "Electrónica": 172282,
     "Oficina": 1064954,
@@ -62,21 +62,24 @@ def ejecutar_busqueda_inversa(
 ):
     clean_key = str(api_key).strip()
     if not clean_key:
-        st.error("No se proporcionó una Keepa API Key válida.")
+        st.error("No se proporcionó una Keepa API Key válida[cite: 30].")
         return pd.DataFrame()
 
-    cat_id = KEEPA_CATEGORIES.get(categoria, 1055398)
+    cat_id = KEEPA_CATEGORIES.get(categoria)
 
-    # Búsqueda por Bestsellers (Consumo: 1 Token)
     asin_list = []
-    try:
-        bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
-        resp = requests.get(bs_url, timeout=15).json()
-        if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
-            asin_list = resp["bestSellersList"]["asinList"]
-    except Exception:
-        pass
 
+    # 1. Búsqueda por Bestsellers si se selecciona una categoría específica
+    if cat_id:
+        try:
+            bs_url = f"https://api.keepa.com/bestsellers?key={clean_key}&domain=1&category={cat_id}"
+            resp = requests.get(bs_url, timeout=15).json()
+            if "bestSellersList" in resp and "asinList" in resp["bestSellersList"]:
+                asin_list = resp["bestSellersList"]["asinList"]
+        except Exception:
+            pass
+
+    # 2. Búsqueda por término neutro si es Búsqueda Global ("Todas") o por Marca
     if not asin_list:
         term = marca.strip() if (modo == "MARCA" and marca.strip()) else "kitchen"
         try:
@@ -91,8 +94,8 @@ def ejecutar_busqueda_inversa(
         st.error("No se pudieron recuperar productos desde Keepa.")
         return pd.DataFrame()
 
-    # Procesar sólo 12 ASINs por consulta para respetar el límite de 21 tokens/min
-    asins_str = ",".join(asin_list[:12])
+    # Procesar únicamente 10 ASINs por consulta para respetar la tasa de 21 tokens/minuto[cite: 31]
+    asins_str = ",".join(asin_list[:10])
     prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90"
 
     try:
@@ -121,14 +124,16 @@ def ejecutar_busqueda_inversa(
             fbm_count = prod.get("fbmOfferCount", 0) or 0
             total_sellers = stats.get("retrievedOfferCount", 0) or (fba_count + fbm_count)
 
-            if total_sellers <= 0 or (min_sellers > 0 and total_sellers < min_sellers):
-                continue
-
             buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
             if buybox_cents <= 0 and "current" in stats and len(stats.get("current", [])) > 1:
                 buybox_cents = stats["current"][1] or 0
 
             buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else min_precio
+            
+            # Filtro por rango de precio
+            if buybox_price < min_precio or buybox_price > max_precio:
+                continue
+
             bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats.get("avg", [])) > 3 else 0
             monthly_sold = prod.get("boughtInPastMonth", 0) or 0
 
