@@ -86,13 +86,11 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=1, max_bsr=1500
             st.warning("Por favor carga un archivo o pega al menos un ASIN válido.")
             return
 
-        # Limitar a máximo 15 ASINs para no exceder la tasa de 21 tokens/minuto
         asins_unicos = list(dict.fromkeys(asins_para_procesar))[:15]
         asins_str = ",".join(asins_unicos)
 
-        st.info(f"Consultando métricas ligeras en Keepa para {len(asins_unicos)} productos...")
+        st.info(f"Consultando métricas en Keepa para {len(asins_unicos)} productos...")
 
-        # NOTA: Se elimina 'offers=20' para consumir únicamente 1 token por llamada
         prod_url = f"https://api.keepa.com/product?key={clean_key}&domain=1&asin={asins_str}&stats=90"
 
         try:
@@ -119,33 +117,30 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=1, max_bsr=1500
 
                 fba_count = prod.get("fbaOfferCount", 0) or stats.get("retrievedOfferCountFBA", 0) or 0
                 fbm_count = prod.get("fbmOfferCount", 0) or 0
-                total_sellers = stats.get("retrievedOfferCount", 0) or (fba_count + fbm_count)
-
-                if total_sellers <= 0 or (min_sellers > 0 and total_sellers < min_sellers):
-                    continue
+                total_sellers = stats.get("retrievedOfferCount", 0)
 
                 buybox_cents = stats.get("buyBoxPriceMin", 0) or 0
                 if buybox_cents <= 0 and "current" in stats and len(stats.get("current", [])) > 1:
                     buybox_cents = stats["current"][1] or 0
 
-                buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else 19.99
+                buybox_price = buybox_cents / 100.0 if buybox_cents > 0 else 0.0
                 bsr_90 = stats.get("avg", [0]*100)[3] if "avg" in stats and len(stats.get("avg", [])) > 3 else 0
                 monthly_sold = prod.get("boughtInPastMonth", 0) or 0
 
                 costo_est = buybox_price * (porcentaje_costo / 100.0)
-                fba_fee = buybox_price * 0.15 + 2.00
-                ganancia = buybox_price - costo_est - fba_fee
+                fba_fee = buybox_price * 0.15 + 2.00 if buybox_price > 0 else 0.0
+                ganancia = buybox_price - costo_est - fba_fee if buybox_price > 0 else 0.0
                 roi = (ganancia / costo_est) * 100 if costo_est > 0 else 0.0
 
-                if min_roi > 0 and roi < min_roi:
-                    continue
+                estado_stock = "Disponible" if buybox_price > 0 else "Sin Stock / Descatalogado"
 
                 productos.append({
                     "ASIN": asin,
                     "Producto": title[:40] + "...",
                     "Marca": brand,
-                    "Vend. FBA": fba_count,
-                    "Total Vend.": total_sellers,
+                    "Estado": estado_stock,
+                    "Vend. FBA": fba_count if fba_count >= 0 else 0,
+                    "Total Vend.": total_sellers if total_sellers >= 0 else 0,
                     "Vendedor BuyBox": current_seller_name[:20] if current_seller_name else "Multivendedor",
                     "BSR 90d": bsr_90 if bsr_90 > 0 else "N/A",
                     "Ventas/Mes": monthly_sold,
@@ -161,7 +156,7 @@ def render_catalog_analyzer(api_key="", min_roi=0.0, min_sellers=1, max_bsr=1500
                 st.success(f"¡Se procesaron exitosamente {len(df_resultado)} productos!")
                 st.dataframe(df_resultado, use_container_width=True)
             else:
-                st.warning("Ningún producto del lote cumplió con los filtros de marca o vendedores.")
+                st.warning("No se obtuvieron registros válidos para esta lista.")
 
         except Exception as e:
             st.error(f"Error procesando la solicitud: {str(e)}")
